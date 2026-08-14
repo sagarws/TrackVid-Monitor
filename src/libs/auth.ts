@@ -8,61 +8,93 @@ import type { Adapter } from 'next-auth/adapters'
 
 const prisma = new PrismaClient()
 
+type TrackVidPhone = {
+  code?: string
+  number?: string
+  countryCode?: string
+}
+
+type TrackVidLoginUser = {
+  id: string
+  email: string
+  name?: {
+    firstName?: string
+    lastName?: string
+    fullName?: string
+  }
+  phone?: TrackVidPhone
+  companyId?: string
+}
+
+type TrackVidLoginResponse = {
+  isSuccess: boolean
+  displayMessage?: string
+  message?: string
+  data?: {
+    accessToken: string
+    user: TrackVidLoginUser
+  }
+}
+
+const formatPhone = (phone?: TrackVidPhone) => {
+  if (!phone?.number) return ''
+  const code = phone.code ? `+${phone.code.replace(/^\+/, '')} ` : ''
+
+  return `${code}${phone.number}`.trim()
+}
+
 export const authOptions: NextAuthOptions = {
   adapter: PrismaAdapter(prisma) as Adapter,
 
-  // ** Configure one or more authentication providers
-  // ** Please refer to https://next-auth.js.org/configuration/options#providers for more `providers` options
   providers: [
     CredentialProvider({
-      // ** The name to display on the sign in form (e.g. 'Sign in with...')
-      // ** For more details on Credentials Provider, visit https://next-auth.js.org/providers/credentials
       name: 'Credentials',
       type: 'credentials',
-
-      /*
-       * As we are using our own Sign-in page, we do not need to change
-       * username or password attributes manually in following credentials object.
-       */
       credentials: {},
       async authorize(credentials) {
-        /*
-         * You need to provide your own logic here that takes the credentials submitted and returns either
-         * an object representing a user or value that is false/null if the credentials are invalid.
-         * For e.g. return { id: 1, name: 'J Smith', email: 'jsmith@example.com' }
-         * You can also use the `req` object to obtain additional parameters (i.e., the request IP address)
-         */
         const { email, password } = credentials as { email: string; password: string }
 
+        const apiBase = process.env.TRACKVID_API_URL
+
+        if (!apiBase) {
+          throw new Error(JSON.stringify({ message: ['TRACKVID_API_URL is not configured'] }))
+        }
+
+        let res: Response
+
         try {
-          // ** Login API Call to match the user credentials and receive user data in response along with his role
-          const res = await fetch(`${process.env.API_URL}/login`, {
+          res = await fetch(`${apiBase}/auth/login`, {
             method: 'POST',
             headers: {
-              'Content-Type': 'application/json'
+              'Content-Type': 'application/json',
+              Accept: 'application/json'
             },
             body: JSON.stringify({ email, password })
           })
-
-          const data = await res.json()
-
-          if (res.status === 401) {
-            throw new Error(JSON.stringify(data))
-          }
-
-          if (res.status === 200) {
-            /*
-             * Please unset all the sensitive information of the user either from API response or before returning
-             * user data below. Below return statement will set the user object in the token and the same is set in
-             * the session which will be accessible all over the app.
-             */
-            return data
-          }
-
-          return null
-        } catch (e: any) {
-          throw new Error(e.message)
+        } catch (err: any) {
+          throw new Error(JSON.stringify({ message: [err?.message || 'Unable to reach TrackVid API'] }))
         }
+
+        const data = (await res.json().catch(() => null)) as TrackVidLoginResponse | null
+
+        if (!res.ok || !data?.isSuccess || !data.data) {
+          const displayMessage = data?.displayMessage || data?.message || 'Invalid email or password'
+
+          throw new Error(JSON.stringify({ message: [displayMessage] }))
+        }
+
+        const { accessToken, user } = data.data
+
+        return {
+          id: user.id,
+          email: user.email,
+          name: user.name?.fullName || `${user.name?.firstName ?? ''} ${user.name?.lastName ?? ''}`.trim() || user.email,
+          firstName: user.name?.firstName ?? '',
+          lastName: user.name?.lastName ?? '',
+          phone: formatPhone(user.phone),
+          companyId: user.companyId ?? '',
+          accessToken
+        } as any
       }
     }),
 
@@ -70,56 +102,46 @@ export const authOptions: NextAuthOptions = {
       clientId: process.env.GOOGLE_CLIENT_ID as string,
       clientSecret: process.env.GOOGLE_CLIENT_SECRET as string
     })
-
-    // ** ...add more providers here
   ],
 
-  // ** Please refer to https://next-auth.js.org/configuration/options#session for more `session` options
   session: {
-    /*
-     * Choose how you want to save the user session.
-     * The default is `jwt`, an encrypted JWT (JWE) stored in the session cookie.
-     * If you use an `adapter` however, NextAuth default it to `database` instead.
-     * You can still force a JWT session by explicitly defining `jwt`.
-     * When using `database`, the session cookie will only contain a `sessionToken` value,
-     * which is used to look up the session in the database.
-     * If you use a custom credentials provider, user accounts will not be persisted in a database by NextAuth.js (even if one is configured).
-     * The option to use JSON Web Tokens for session tokens must be enabled to use a custom credentials provider.
-     */
     strategy: 'jwt',
-
-    // ** Seconds - How long until an idle session expires and is no longer valid
-    maxAge: 30 * 24 * 60 * 60 // ** 30 days
+    maxAge: 30 * 24 * 60 * 60
   },
 
-  // ** Please refer to https://next-auth.js.org/configuration/options#pages for more `pages` options
   pages: {
     signIn: '/login'
   },
 
-  // ** Please refer to https://next-auth.js.org/configuration/options#callbacks for more `callbacks` options
   callbacks: {
-    /*
-     * While using `jwt` as a strategy, `jwt()` callback will be called before
-     * the `session()` callback. So we have to add custom parameters in `token`
-     * via `jwt()` callback to make them accessible in the `session()` callback
-     */
     async jwt({ token, user }) {
       if (user) {
-        /*
-         * For adding custom parameters to user in session, we first need to add those parameters
-         * in token which then will be available in the `session()` callback
-         */
-        token.name = user.name
+        const u = user as any
+
+        token.name = u.name
+        token.email = u.email
+        token.firstName = u.firstName
+        token.lastName = u.lastName
+        token.phone = u.phone
+        token.companyId = u.companyId
+        token.accessToken = u.accessToken
       }
 
       return token
     },
     async session({ session, token }) {
       if (session.user) {
-        // ** Add custom params to user in session which are added in `jwt()` callback via `token` parameter
-        session.user.name = token.name
+        const su = session.user as any
+
+        su.name = token.name
+        su.email = token.email
+        su.firstName = (token as any).firstName
+        su.lastName = (token as any).lastName
+        su.phone = (token as any).phone
+        su.companyId = (token as any).companyId
       }
+
+      ;(session as any).accessToken = (token as any).accessToken
 
       return session
     }
