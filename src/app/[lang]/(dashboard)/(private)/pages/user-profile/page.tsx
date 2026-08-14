@@ -14,10 +14,9 @@ const ProfilePage = async () => {
   return (
     <UserProfile
       user={{
-        fullName: user?.name || `${user?.firstName ?? ''} ${user?.lastName ?? ''}`.trim() || user?.email || 'User',
+        fullName: user?.name || user?.email || 'User',
         email: user?.email || '',
-        phone: user?.phone || '',
-        companyId: user?.companyId || '',
+        role: user?.role || '',
         profileImg: user?.image || '/images/avatars/1.png'
       }}
     />

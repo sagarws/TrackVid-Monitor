@@ -17,7 +17,7 @@ const renderList = (list: Row[]) =>
       <i className={item.icon} />
       <div className='flex items-center flex-wrap gap-2'>
         <Typography className='font-medium'>{`${item.property}:`}</Typography>
-        <Typography>{item.value}</Typography>
+        <Typography className='capitalize'>{item.value}</Typography>
       </div>
     </div>
   ))
@@ -26,12 +26,11 @@ const AboutOverview = ({ user }: { user: ProfileUser }) => {
   const about: Row[] = [
     { icon: 'tabler-user', property: 'Full Name', value: user.fullName || '—' },
     { icon: 'tabler-check', property: 'Status', value: 'Active' },
-    { icon: 'tabler-mail', property: 'Email', value: user.email || '—' },
-    { icon: 'tabler-phone', property: 'Phone', value: user.phone || '—' }
+    { icon: 'tabler-mail', property: 'Email', value: user.email || '—' }
   ]
 
-  if (user.companyId) {
-    about.push({ icon: 'tabler-building', property: 'Company', value: user.companyId })
+  if (user.role) {
+    about.push({ icon: 'tabler-shield-lock', property: 'Role', value: user.role })
   }
 
   return (

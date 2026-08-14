@@ -8,39 +8,19 @@ import type { Adapter } from 'next-auth/adapters'
 
 const prisma = new PrismaClient()
 
-type TrackVidPhone = {
-  code?: string
-  number?: string
-  countryCode?: string
-}
-
-type TrackVidLoginUser = {
-  id: string
-  email: string
-  name?: {
-    firstName?: string
-    lastName?: string
-    fullName?: string
-  }
-  phone?: TrackVidPhone
-  companyId?: string
-}
-
-type TrackVidLoginResponse = {
+type SystemAdminVerifyResponse = {
   isSuccess: boolean
   displayMessage?: string
   message?: string
   data?: {
     accessToken: string
-    user: TrackVidLoginUser
+    user: {
+      id: string
+      email: string
+      name: string
+      role: string
+    }
   }
-}
-
-const formatPhone = (phone?: TrackVidPhone) => {
-  if (!phone?.number) return ''
-  const code = phone.code ? `+${phone.code.replace(/^\+/, '')} ` : ''
-
-  return `${code}${phone.number}`.trim()
 }
 
 export const authOptions: NextAuthOptions = {
@@ -52,7 +32,15 @@ export const authOptions: NextAuthOptions = {
       type: 'credentials',
       credentials: {},
       async authorize(credentials) {
-        const { email, password } = credentials as { email: string; password: string }
+        const { tempToken, code, isSetup } = (credentials || {}) as {
+          tempToken?: string
+          code?: string
+          isSetup?: string
+        }
+
+        if (!tempToken || !code) {
+          throw new Error(JSON.stringify({ message: ['Missing 2FA credentials'] }))
+        }
 
         const apiBase = process.env.TRACKVID_API_URL
 
@@ -60,25 +48,27 @@ export const authOptions: NextAuthOptions = {
           throw new Error(JSON.stringify({ message: ['TRACKVID_API_URL is not configured'] }))
         }
 
+        const endpoint = isSetup === 'true' ? '/auth/system-admin-2fa-verify-setup' : '/auth/system-admin-2fa-verify'
+
         let res: Response
 
         try {
-          res = await fetch(`${apiBase}/auth/login`, {
+          res = await fetch(`${apiBase}${endpoint}`, {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
               Accept: 'application/json'
             },
-            body: JSON.stringify({ email, password })
+            body: JSON.stringify({ tempToken, code })
           })
         } catch (err: any) {
           throw new Error(JSON.stringify({ message: [err?.message || 'Unable to reach TrackVid API'] }))
         }
 
-        const data = (await res.json().catch(() => null)) as TrackVidLoginResponse | null
+        const data = (await res.json().catch(() => null)) as SystemAdminVerifyResponse | null
 
         if (!res.ok || !data?.isSuccess || !data.data) {
-          const displayMessage = data?.displayMessage || data?.message || 'Invalid email or password'
+          const displayMessage = data?.displayMessage || data?.message || 'Two-factor verification failed'
 
           throw new Error(JSON.stringify({ message: [displayMessage] }))
         }
@@ -88,11 +78,8 @@ export const authOptions: NextAuthOptions = {
         return {
           id: user.id,
           email: user.email,
-          name: user.name?.fullName || `${user.name?.firstName ?? ''} ${user.name?.lastName ?? ''}`.trim() || user.email,
-          firstName: user.name?.firstName ?? '',
-          lastName: user.name?.lastName ?? '',
-          phone: formatPhone(user.phone),
-          companyId: user.companyId ?? '',
+          name: user.name,
+          role: user.role,
           accessToken
         } as any
       }
@@ -120,10 +107,7 @@ export const authOptions: NextAuthOptions = {
 
         token.name = u.name
         token.email = u.email
-        token.firstName = u.firstName
-        token.lastName = u.lastName
-        token.phone = u.phone
-        token.companyId = u.companyId
+        token.role = u.role
         token.accessToken = u.accessToken
       }
 
@@ -135,10 +119,7 @@ export const authOptions: NextAuthOptions = {
 
         su.name = token.name
         su.email = token.email
-        su.firstName = (token as any).firstName
-        su.lastName = (token as any).lastName
-        su.phone = (token as any).phone
-        su.companyId = (token as any).companyId
+        su.role = (token as any).role
       }
 
       ;(session as any).accessToken = (token as any).accessToken

@@ -27,10 +27,10 @@ const UserProfileHeader = ({ user }: { user: ProfileUser }) => {
                   <Typography className='font-medium'>{user.email}</Typography>
                 </div>
               )}
-              {user.phone && (
+              {user.role && (
                 <div className='flex items-center gap-2'>
-                  <i className='tabler-phone' />
-                  <Typography className='font-medium'>{user.phone}</Typography>
+                  <i className='tabler-shield-lock' />
+                  <Typography className='font-medium capitalize'>{user.role}</Typography>
                 </div>
               )}
             </div>

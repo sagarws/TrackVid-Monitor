@@ -8,8 +8,7 @@ import AboutOverview from './profile/AboutOverview'
 export type ProfileUser = {
   fullName: string
   email: string
-  phone: string
-  companyId: string
+  role: string
   profileImg: string
 }
 
