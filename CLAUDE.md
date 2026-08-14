@@ -14,6 +14,7 @@
 8. **Theme + i18n over hardcoding.** Use theme tokens for colors/spacing; do not hardcode translatable strings.
 9. **Path aliases.** Import via `@core/*`, `@layouts/*`, `@menu/*`, `@/*` (see `tsconfig.json`). Avoid deep relative paths.
 10. **Dev server runs on port `4001`** (`pnpm dev`). Verify UI changes in the browser before declaring done.
+11. **English-only.** Do not maintain `src/data/dictionaries/en.json` (or any locale file). Do not import from `src/data/dictionaries/*` in new code. Hardcode English UI strings. `[lang]` stays in routes but is effectively fixed to `en`.
 
 ## Definition of done (Claude checklist)
 

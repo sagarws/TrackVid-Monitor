@@ -124,6 +124,14 @@ Adding a new dependency requires justification — check `package.json` first.
 
 ---
 
+## 5a. Internationalization — English Only
+
+- The app is **English-only**. Locale is locked to `en` in `src/configs/i18n.ts`.
+- **Do NOT maintain `src/data/dictionaries/en.json`** (or `fr.json` / `ar.json`). Do not add new keys, do not import from `src/data/dictionaries/*` in new code.
+- New UI copy: hardcode English strings directly in the component/view.
+- The `[lang]` route segment stays for structural reasons — treat `lang` as effectively fixed to `en`.
+- Do not re-add French, Arabic, or any other locale, and do not restore the `<LanguageDropdown />` in navbars.
+
 ## 6. Coding Conventions
 
 - **Language:** TypeScript strict — no `any` unless unavoidable and commented.
