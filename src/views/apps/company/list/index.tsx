@@ -40,6 +40,34 @@ export type CompanyRow = {
   adminName: string
   adminEmail: string
   adminPhone: string
+  lastSync: {
+    ajio: string
+    myntra: string
+    snapdeal: string
+  }
+}
+
+const PLATFORM_LABELS: { key: keyof CompanyRow['lastSync']; label: string }[] = [
+  { key: 'ajio', label: 'Ajio' },
+  { key: 'myntra', label: 'Myntra' },
+  { key: 'snapdeal', label: 'Snapdeal' }
+]
+
+const formatSyncDate = (iso: string) => {
+  if (!iso) return '—'
+  const d = new Date(iso)
+
+  if (Number.isNaN(d.getTime())) return '—'
+
+  const day = String(d.getDate()).padStart(2, '0')
+  const month = d.toLocaleString('en-US', { month: 'short' })
+  const year = d.getFullYear()
+  const rawHours = d.getHours()
+  const ampm = rawHours >= 12 ? 'PM' : 'AM'
+  const hours = String(rawHours % 12 || 12).padStart(2, '0')
+  const minutes = String(d.getMinutes()).padStart(2, '0')
+
+  return `${day} ${month}, ${year}, ${hours}:${minutes} ${ampm}`
 }
 
 type Props = {
@@ -88,6 +116,20 @@ const CompanyList = ({ rows, impersonateBaseUrl, error }: Props) => {
         header: 'Phone',
         cell: ({ row }) => <Typography>{row.original.adminPhone || '—'}</Typography>
       }),
+      {
+        id: 'lastSync',
+        header: 'Last Sync',
+        enableSorting: false,
+        cell: ({ row }) => (
+          <div className='flex flex-col gap-0.5'>
+            {PLATFORM_LABELS.map(({ key, label }) => (
+              <Typography key={key} variant='body2' className='whitespace-nowrap'>
+                <span className='font-medium'>{label}:</span> {formatSyncDate(row.original.lastSync[key])}
+              </Typography>
+            ))}
+          </div>
+        )
+      },
       {
         id: 'action',
         header: 'Action',

@@ -15,6 +15,29 @@ const formatPhone = (phone: any): string => {
   return `${code}${phone.number}`.trim()
 }
 
+const TRACKED_PLATFORMS = ['ajio', 'myntra', 'snapdeal'] as const
+
+type PlatformKey = (typeof TRACKED_PLATFORMS)[number]
+
+const toIsoDate = (value: unknown): string => {
+  if (!value) return ''
+  const parsed = new Date(value as any)
+
+  return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString()
+}
+
+const pickLastSync = (raw: any): Record<PlatformKey, string> => {
+  const out = { ajio: '', myntra: '', snapdeal: '' } as Record<PlatformKey, string>
+
+  if (!raw || typeof raw !== 'object') return out
+
+  for (const platform of TRACKED_PLATFORMS) {
+    out[platform] = toIsoDate(raw?.[platform])
+  }
+
+  return out
+}
+
 const fetchCompanies = async (accessToken?: string): Promise<{ rows: CompanyRow[]; error?: string }> => {
   const apiBase = process.env.TRACKVID_API_URL
 
@@ -54,7 +77,8 @@ const fetchCompanies = async (accessToken?: string): Promise<{ rows: CompanyRow[
       companyName: String(u?.company?.name ?? '—'),
       adminName: String(u?.name?.fullName || `${u?.name?.firstName ?? ''} ${u?.name?.lastName ?? ''}`.trim() || '—'),
       adminEmail: String(u?.email ?? ''),
-      adminPhone: formatPhone(u?.phone)
+      adminPhone: formatPhone(u?.phone),
+      lastSync: pickLastSync(u?.company?.masterDataSync)
     }))
 
     return { rows }
