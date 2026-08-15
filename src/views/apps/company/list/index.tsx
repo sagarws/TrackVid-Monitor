@@ -22,6 +22,10 @@ import FormControlLabel from '@mui/material/FormControlLabel'
 import FormGroup from '@mui/material/FormGroup'
 import Snackbar from '@mui/material/Snackbar'
 import Pagination from '@mui/material/Pagination'
+import Popover from '@mui/material/Popover'
+import Divider from '@mui/material/Divider'
+import Badge from '@mui/material/Badge'
+import Chip from '@mui/material/Chip'
 
 // Third-party Imports
 import classnames from 'classnames'
@@ -40,6 +44,23 @@ import CustomTextField from '@core/components/mui/TextField'
 // Style Imports
 import tableStyles from '@core/styles/table.module.css'
 
+// One marketplace credential and when it last synced. The master-data jobs
+// stamp `masterDataSync` per credential (not per company), so two accounts on
+// the same platform can legitimately sit at different dates — that difference
+// is the whole point of the expandable panel below.
+export type CredentialSync = {
+  credentialId: string
+  username: string
+  isVerified: boolean
+  lastSync: string // ISO string, '' when never synced
+}
+
+export type PlatformCredentials = {
+  key: PlatformKey
+  label: string
+  accounts: CredentialSync[]
+}
+
 export type CompanyRow = {
   userId: string
   companyId: string
@@ -47,11 +68,16 @@ export type CompanyRow = {
   adminName: string
   adminEmail: string
   adminPhone: string
+  // Per-platform rollup shown in the collapsed row: the OLDEST date across that
+  // platform's credentials, so a single stale account stays visible instead of
+  // being masked by a freshly-synced sibling.
   lastSync: {
     ajio: string
     myntra: string
     snapdeal: string
   }
+  // Full per-credential breakdown, rendered when the row is expanded.
+  credentials: PlatformCredentials[]
 }
 
 type PlatformKey = keyof CompanyRow['lastSync']
@@ -78,24 +104,59 @@ const toIsoDate = (value: unknown): string => {
   return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString()
 }
 
-const pickLastSync = (raw: any): CompanyRow['lastSync'] => {
+// Build the per-platform credential breakdown from
+// company.settings.eCommercePlatformLoginInfo. Platform names are matched
+// case-insensitively — the DB holds "AJIO", "myntra", "snapdeal" inconsistently.
+const pickCredentials = (loginInfo: any): PlatformCredentials[] => {
+  const platforms = Array.isArray(loginInfo) ? loginInfo : []
+
+  return PLATFORM_LABELS.map(({ key, label }) => {
+    const entry = platforms.find((p: any) => String(p?.eComPlatform ?? '').toLowerCase() === key)
+
+    const accounts: CredentialSync[] = (Array.isArray(entry?.info) ? entry.info : []).map((acc: any) => ({
+      credentialId: String(acc?._id ?? ''),
+      username: String(acc?.username ?? '—'),
+      isVerified: acc?.is_verified !== false, // undefined = legacy cred, treat as verified
+      lastSync: toIsoDate(acc?.masterDataSync)
+    }))
+
+    return { key, label, accounts }
+  })
+}
+
+// Collapsed-row rollup: the OLDEST sync across a platform's credentials, so one
+// lagging account is visible without expanding. '' when the platform has no
+// credentials, or none of them has ever synced.
+const rollUpLastSync = (credentials: PlatformCredentials[]): CompanyRow['lastSync'] => {
   const out = { ajio: '', myntra: '', snapdeal: '' } as CompanyRow['lastSync']
 
-  if (!raw || typeof raw !== 'object') return out
-  for (const platform of TRACKED_PLATFORMS) out[platform] = toIsoDate(raw?.[platform])
+  for (const { key, accounts } of credentials) {
+    if (!accounts.length) continue
+
+    // A never-synced account makes the whole platform "—": there is no date
+    // that honestly describes "everything is synced since X".
+    if (accounts.some(a => !a.lastSync)) continue
+
+    out[key] = accounts.reduce((oldest, a) => (!oldest || a.lastSync < oldest ? a.lastSync : oldest), '')
+  }
 
   return out
 }
 
-const mapUserToRow = (u: any): CompanyRow => ({
-  userId: String(u?._id ?? ''),
-  companyId: String(u?.company?._id ?? ''),
-  companyName: String(u?.company?.name ?? '—'),
-  adminName: String(u?.name?.fullName || `${u?.name?.firstName ?? ''} ${u?.name?.lastName ?? ''}`.trim() || '—'),
-  adminEmail: String(u?.email ?? ''),
-  adminPhone: formatPhone(u?.phone),
-  lastSync: pickLastSync(u?.company?.masterDataSync)
-})
+const mapUserToRow = (u: any): CompanyRow => {
+  const credentials = pickCredentials(u?.company?.settings?.eCommercePlatformLoginInfo)
+
+  return {
+    userId: String(u?._id ?? ''),
+    companyId: String(u?.company?._id ?? ''),
+    companyName: String(u?.company?.name ?? '—'),
+    adminName: String(u?.name?.fullName || `${u?.name?.firstName ?? ''} ${u?.name?.lastName ?? ''}`.trim() || '—'),
+    adminEmail: String(u?.email ?? ''),
+    adminPhone: formatPhone(u?.phone),
+    lastSync: rollUpLastSync(credentials),
+    credentials
+  }
+}
 
 const formatSyncDate = (iso: string) => {
   if (!iso) return '—'
@@ -148,6 +209,140 @@ type Props = {
   impersonateBaseUrl: string
 }
 
+// A checkbox row that visibly changes state when ticked. Plain MUI checkboxes
+// on a dark surface read as near-identical whether on or off at a glance; the
+// tinted, bordered row is what makes an active filter obvious without having to
+// look at the box itself.
+const FilterCheck = ({
+  label,
+  checked,
+  onChange,
+  dense
+}: {
+  label: string
+  checked: boolean
+  onChange: (v: boolean) => void
+  dense?: boolean
+}) => (
+  <FormControlLabel
+    label={label}
+    className={classnames('is-full mli-0 rounded border transition-colors', {
+      'bg-primaryLight border-primary': checked,
+      'border-transparent hover:bg-actionHover': !checked,
+      'plb-0.5': dense,
+      'plb-1': !dense
+    })}
+    control={
+      <Checkbox size='small' checked={checked} onChange={e => onChange(e.target.checked)} />
+    }
+    slotProps={{
+      typography: {
+        variant: 'body2',
+        color: checked ? 'text.primary' : 'text.secondary',
+        className: checked ? 'font-medium' : ''
+      }
+    }}
+  />
+)
+
+// Expanded row content: every marketplace credential for the company with its
+// own last-sync timestamp. Grouped by platform; platforms with no credentials
+// are shown as empty rather than hidden, so ops can tell "not configured" apart
+// from "configured but never synced".
+const CredentialSyncPanel = ({
+  credentials,
+  companyId,
+  inFlight,
+  onSyncCredential
+}: {
+  credentials: PlatformCredentials[]
+  companyId: string
+  inFlight: Set<string>
+  onSyncCredential: (companyId: string, platform: PlatformKey, credentialId: string) => void
+}) => (
+  <div className='flex flex-col gap-4 plb-4 pli-6 bg-actionHover'>
+    {credentials.map(({ key, label, accounts }) => (
+      <div key={key} className='flex flex-col gap-1'>
+        <div className='flex items-center gap-2'>
+          <Typography variant='subtitle2' color='text.primary' className='uppercase tracking-wide'>
+            {label}
+          </Typography>
+          <Typography variant='caption' color='text.secondary'>
+            {accounts.length === 0
+              ? 'no accounts configured'
+              : `${accounts.filter(a => a.lastSync).length} of ${accounts.length} synced`}
+          </Typography>
+        </div>
+
+        {accounts.length > 0 && (
+          <div className='flex flex-col'>
+            {accounts.map(acc => (
+              <div
+                key={acc.credentialId || acc.username}
+                className='flex items-center justify-between gap-4 plb-1.5 border-bs first:border-bs-0'
+              >
+                <div className='flex items-center gap-2 min-is-0'>
+                  <Typography variant='body2' color='text.primary' className='truncate'>
+                    {acc.username}
+                  </Typography>
+                  {/* An unverified credential is skipped by the sync jobs
+                      entirely, which explains a date that never advances. */}
+                  {!acc.isVerified && (
+                    <Tooltip title='Credential marked unverified — the sync jobs skip it until it is re-verified'>
+                      <span className='flex items-center gap-1 text-warning'>
+                        <i className='tabler-alert-triangle text-sm' />
+                        <Typography variant='caption' color='warning.main'>
+                          unverified
+                        </Typography>
+                      </span>
+                    </Tooltip>
+                  )}
+                </div>
+                <div className='flex items-center gap-1 whitespace-nowrap'>
+                  <Typography
+                    variant='body2'
+                    color={acc.lastSync ? 'text.secondary' : 'text.disabled'}
+                    className='tabular-nums'
+                  >
+                    {acc.lastSync ? formatSyncDate(acc.lastSync) : 'never synced'}
+                  </Typography>
+                  {(() => {
+                    const busy = inFlight.has(`${companyId}:${key}:${acc.credentialId}`)
+
+                    return (
+                      <Tooltip
+                        title={
+                          acc.credentialId
+                            ? `Sync only ${acc.username}`
+                            : 'Credential has no id — cannot sync individually'
+                        }
+                      >
+                        <span>
+                          <IconButton
+                            size='small'
+                            disabled={busy || !acc.credentialId || !companyId}
+                            onClick={() => onSyncCredential(companyId, key, acc.credentialId)}
+                          >
+                            {busy ? (
+                              <CircularProgress size={14} />
+                            ) : (
+                              <i className='tabler-refresh text-base' />
+                            )}
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                    )
+                  })()}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    ))}
+  </div>
+)
+
 const columnHelper = createColumnHelper<CompanyRow>()
 
 const CompanyList = ({ impersonateBaseUrl }: Props) => {
@@ -170,6 +365,64 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   })
   const [dialogSubmitting, setDialogSubmitting] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
+
+  // ── Credential filters (server-side) ────────────────────────────────────
+  // Matched in the DB, not on the current page: credentials are spread across
+  // ~600 companies, so filtering a single page client-side would miss almost
+  // every match and make the counts lie.
+  const [filterPlatforms, setFilterPlatforms] = useState<Record<PlatformKey, boolean>>({
+    ajio: false,
+    myntra: false,
+    snapdeal: false
+  })
+  const [filterNoCredentials, setFilterNoCredentials] = useState(false)
+  // Yes/No are independent checkboxes; both (or neither) ticked means "don't care".
+  const [filterVerifiedYes, setFilterVerifiedYes] = useState(false)
+  const [filterVerifiedNo, setFilterVerifiedNo] = useState(false)
+  const [filterSyncedYes, setFilterSyncedYes] = useState(false)
+  const [filterSyncedNo, setFilterSyncedNo] = useState(false)
+  const [filterAnchor, setFilterAnchor] = useState<null | HTMLElement>(null)
+
+  const selectedPlatforms = useMemo(
+    () => (Object.keys(filterPlatforms) as PlatformKey[]).filter(k => filterPlatforms[k]),
+    [filterPlatforms]
+  )
+
+  // Both or neither ticked collapses to undefined — an unanswerable filter.
+  const credentialVerified = useMemo<'yes' | 'no' | undefined>(() => {
+    if (filterVerifiedYes === filterVerifiedNo) return undefined
+
+    return filterVerifiedYes ? 'yes' : 'no'
+  }, [filterVerifiedYes, filterVerifiedNo])
+
+  const masterDataSynced = useMemo<'yes' | 'no' | undefined>(() => {
+    if (filterSyncedYes === filterSyncedNo) return undefined
+
+    return filterSyncedYes ? 'yes' : 'no'
+  }, [filterSyncedYes, filterSyncedNo])
+
+  const activeFilterCount =
+    selectedPlatforms.length +
+    (filterNoCredentials ? 1 : 0) +
+    (credentialVerified ? 1 : 0) +
+    (masterDataSynced ? 1 : 0)
+
+  const clearFilters = useCallback(() => {
+    setFilterPlatforms({ ajio: false, myntra: false, snapdeal: false })
+    setFilterNoCredentials(false)
+    setFilterVerifiedYes(false)
+    setFilterVerifiedNo(false)
+    setFilterSyncedYes(false)
+    setFilterSyncedNo(false)
+    setPage(0)
+  }, [])
+
+  // Which company rows have their per-credential sync panel open.
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+
+  const toggleExpanded = useCallback((companyId: string) => {
+    setExpanded(prev => ({ ...prev, [companyId]: !prev[companyId] }))
+  }, [])
 
   // Debounce search input so we don't spam the API on every keystroke, and
   // reset to page 1 whenever the term changes so the user sees results from
@@ -195,7 +448,16 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
       const res = await fetch('/api/company/list', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ page: page + 1, limit: pageSize, search: debouncedSearch })
+        body: JSON.stringify({
+          page: page + 1,
+          limit: pageSize,
+          search: debouncedSearch,
+          // Omitted when unset so the BE skips the $match entirely.
+          ...(selectedPlatforms.length ? { platforms: selectedPlatforms } : {}),
+          ...(filterNoCredentials ? { noPlatformCredentials: true } : {}),
+          ...(credentialVerified ? { credentialVerified } : {}),
+          ...(masterDataSynced ? { masterDataSynced } : {})
+        })
       })
 
       const json = (await res.json().catch(() => null)) as ListResponse | null
@@ -225,7 +487,15 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     } finally {
       if (reqId === reqIdRef.current) setLoading(false)
     }
-  }, [page, pageSize, debouncedSearch])
+  }, [
+    page,
+    pageSize,
+    debouncedSearch,
+    selectedPlatforms,
+    filterNoCredentials,
+    credentialVerified,
+    masterDataSynced
+  ])
 
   useEffect(() => {
     fetchRows()
@@ -293,20 +563,29 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     }
   }
 
-  const callTrigger = useCallback(async (companyIds: string[], platforms: PlatformKey[]) => {
-    // Hit the Monitor's own Next API route, which reads the SystemAdmin
-    // access token from the NextAuth session server-side and forwards to
-    // TrackVid-BE. Keeps the raw JWT out of the browser.
-    const res = await fetch('/api/company/trigger-master-sync', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ companyIds, platforms })
-    })
+  const callTrigger = useCallback(
+    async (companyIds: string[], platforms: PlatformKey[], credentialIds?: string[]) => {
+      // Hit the Monitor's own Next API route, which reads the SystemAdmin
+      // access token from the NextAuth session server-side and forwards to
+      // TrackVid-BE. Keeps the raw JWT out of the browser.
+      const res = await fetch('/api/company/trigger-master-sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          companyIds,
+          platforms,
+          // Omitted for company/bulk syncs so the runner keeps its existing
+          // "every login of this company" behaviour.
+          ...(credentialIds?.length ? { credentialIds } : {})
+        })
+      })
 
-    const json = (await res.json().catch(() => null)) as SyncResponse | null
+      const json = (await res.json().catch(() => null)) as SyncResponse | null
 
-    return { res, json }
-  }, [])
+      return { res, json }
+    },
+    []
+  )
 
   const runSyncForRowPlatform = async (row: CompanyRow, platform: PlatformKey) => {
     if (!row.companyId) return
@@ -337,6 +616,43 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
       })
     }
   }
+
+  // Sync ONE credential. Same endpoint as the per-platform button, plus a
+  // credentialIds narrowing so the runner touches only this login instead of
+  // every account the company holds on that platform.
+  const runSyncForCredential = useCallback(
+    async (companyId: string, platform: PlatformKey, credentialId: string) => {
+      if (!companyId || !credentialId) return
+      const key = `${companyId}:${platform}:${credentialId}`
+
+      setInFlight(prev => {
+        const next = new Set(prev)
+
+        next.add(key)
+
+        return next
+      })
+
+      try {
+        const { json } = await callTrigger([companyId], [platform], [credentialId])
+
+        setToast(summarizeFanout(json?.data))
+        fetchRows()
+      } catch (err: any) {
+        setToast({ severity: 'error', message: err?.message || 'Sync request failed' })
+      } finally {
+        setInFlight(prev => {
+          const next = new Set(prev)
+
+          next.delete(key)
+
+          return next
+        })
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [callTrigger, fetchRows]
+  )
 
   const submitBulkSync = async () => {
     const platforms = (Object.keys(dialogPlatforms) as PlatformKey[]).filter(k => dialogPlatforms[k])
@@ -382,6 +698,36 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
         ),
         enableSorting: false
       },
+      {
+        id: 'expander',
+        header: () => null,
+        enableSorting: false,
+        cell: ({ row }) => {
+          const isOpen = Boolean(expanded[row.original.companyId])
+          const count = row.original.credentials.reduce((n, p) => n + p.accounts.length, 0)
+
+          return (
+            <Tooltip title={count ? (isOpen ? 'Hide accounts' : `Show ${count} account${count > 1 ? 's' : ''}`) : 'No accounts'}>
+              <span>
+                <IconButton
+                  size='small'
+                  disabled={!count}
+                  aria-label={isOpen ? 'Collapse accounts' : 'Expand accounts'}
+                  aria-expanded={isOpen}
+                  onClick={() => toggleExpanded(row.original.companyId)}
+                >
+                  <i
+                    className={classnames('text-base transition-transform', {
+                      'tabler-chevron-right': true,
+                      'rotate-90': isOpen
+                    })}
+                  />
+                </IconButton>
+              </span>
+            </Tooltip>
+          )
+        }
+      },
       columnHelper.accessor('companyName', {
         header: 'Company',
         cell: ({ row }) => (
@@ -408,14 +754,25 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
         enableSorting: false,
         cell: ({ row }) => (
           <div className='flex flex-col gap-0.5'>
-            {PLATFORM_LABELS.map(({ key, label }) => {
+            {row.original.credentials.map(({ key, label, accounts }) => {
               const busy = inFlight.has(`${row.original.companyId}:${key}`)
+              const synced = accounts.filter(a => a.lastSync).length
+              const rollup = row.original.lastSync[key]
 
               return (
                 <div key={key} className='flex items-center gap-1 whitespace-nowrap'>
                   <Typography variant='body2'>
-                    <span className='font-medium'>{label}:</span> {formatSyncDate(row.original.lastSync[key])}
+                    <span className='font-medium'>{label}:</span> {formatSyncDate(rollup)}
                   </Typography>
+                  {/* Only meaningful once a platform has more than one account —
+                      that is exactly when the single rollup date hides detail. */}
+                  {accounts.length > 1 && (
+                    <Tooltip title={`${synced} of ${accounts.length} accounts synced — expand for details`}>
+                      <Typography variant='caption' color='text.secondary' className='tabular-nums'>
+                        ({synced}/{accounts.length})
+                      </Typography>
+                    </Tooltip>
+                  )}
                   <Tooltip title={`Sync ${label} for this company`}>
                     <span>
                       <IconButton
@@ -454,7 +811,9 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
       }
     ],
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [impersonateBaseUrl, selected, inFlight, pageIdsAllSelected, pageIdsSomeSelected, rows]
+    // `expanded` must stay here — the expander cell renders the chevron's
+    // rotated state, so without it the arrow never flips on open/close.
+    [impersonateBaseUrl, selected, inFlight, pageIdsAllSelected, pageIdsSomeSelected, rows, expanded, toggleExpanded]
   )
 
   const table = useReactTable({
@@ -491,6 +850,196 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
           <MenuItem value='50'>50</MenuItem>
         </CustomTextField>
         <div className='flex items-center gap-3 flex-wrap max-sm:is-full'>
+          {/* Match count for the current search + filters. Sits next to the
+              Filter button so the number and the thing that changed it are read
+              together — a filtered list is otherwise indistinguishable from an
+              empty dataset. Spinner while fetching so a stale count is never
+              mistaken for the new result. */}
+          <div className='flex items-center gap-1.5 whitespace-nowrap'>
+            {loading ? (
+              <CircularProgress size={14} />
+            ) : (
+              <Typography
+                variant='body2'
+                color={activeFilterCount ? 'primary.main' : 'text.primary'}
+                className='font-medium tabular-nums'
+              >
+                {total.toLocaleString('en-IN')}
+              </Typography>
+            )}
+            <Typography variant='body2' color='text.secondary'>
+              {total === 1 ? 'company' : 'companies'}
+              {activeFilterCount ? ' found' : ''}
+            </Typography>
+          </div>
+          <Badge
+            badgeContent={activeFilterCount}
+            color='primary'
+            overlap='rectangular'
+            invisible={!activeFilterCount}
+          >
+            <Button
+              variant={activeFilterCount ? 'contained' : 'outlined'}
+              color='primary'
+              startIcon={<i className='tabler-filter' />}
+              onClick={e => setFilterAnchor(e.currentTarget)}
+              aria-haspopup='true'
+              aria-expanded={Boolean(filterAnchor)}
+            >
+              Filter
+            </Button>
+          </Badge>
+          <Popover
+            open={Boolean(filterAnchor)}
+            anchorEl={filterAnchor}
+            onClose={() => setFilterAnchor(null)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+            elevation={8}
+            slotProps={{
+              paper: {
+                // Explicit surface + border: on the dark theme the default paper
+                // sits too close to the page colour and the table reads straight
+                // through the panel.
+                className: 'is-[320px] mbs-2 rounded-lg border bg-backgroundPaper overflow-hidden'
+              }
+            }}
+          >
+            {/* Header — states what the panel is and how much is active */}
+            <div className='flex items-center justify-between gap-2 plb-3 pli-4 border-be bg-actionHover'>
+              <div className='flex items-center gap-2'>
+                <i className='tabler-filter text-lg text-textPrimary' />
+                <Typography variant='subtitle1' color='text.primary' className='font-medium'>
+                  Filters
+                </Typography>
+                {activeFilterCount > 0 && (
+                  <Chip size='small' variant='tonal' color='primary' label={`${activeFilterCount} active`} />
+                )}
+              </div>
+              <Button size='small' color='secondary' disabled={!activeFilterCount} onClick={clearFilters}>
+                Clear all
+              </Button>
+            </div>
+
+            <div className='flex flex-col gap-4 plb-4 pli-4 max-bs-[60vh] overflow-y-auto'>
+              <div className='flex flex-col gap-1'>
+                <Typography variant='overline' color='text.disabled' className='leading-none'>
+                  Platform
+                </Typography>
+                <Typography variant='caption' color='text.secondary' className='mbe-1'>
+                  Companies holding a credential on any ticked platform
+                </Typography>
+                <FormGroup>
+                  {PLATFORM_LABELS.map(({ key, label }) => (
+                    <FilterCheck
+                      key={key}
+                      label={label}
+                      checked={filterPlatforms[key]}
+                      onChange={v => {
+                        setFilterPlatforms(prev => ({ ...prev, [key]: v }))
+                        setPage(0)
+                      }}
+                    />
+                  ))}
+                </FormGroup>
+              </div>
+
+              <Divider />
+
+              <div className='flex flex-col gap-1'>
+                <Typography variant='overline' color='text.disabled' className='leading-none'>
+                  Not configured
+                </Typography>
+                <FilterCheck
+                  label='No platform credentials'
+                  checked={filterNoCredentials}
+                  onChange={v => {
+                    setFilterNoCredentials(v)
+                    setPage(0)
+                  }}
+                />
+                <Typography variant='caption' color='text.secondary' className='pis-2'>
+                  Companies with no marketplace account set up. Combines with the platforms above as OR.
+                </Typography>
+              </div>
+
+              <Divider />
+
+              <div className='flex flex-col gap-1'>
+                <Typography variant='overline' color='text.disabled' className='leading-none'>
+                  Verified credential
+                </Typography>
+                <Typography variant='caption' color='text.secondary' className='mbe-1'>
+                  Ticking both (or neither) means no preference
+                </Typography>
+                <div className='flex gap-2'>
+                  <div className='flex-1'>
+                    <FilterCheck
+                      dense
+                      label='Yes'
+                      checked={filterVerifiedYes}
+                      onChange={v => {
+                        setFilterVerifiedYes(v)
+                        setPage(0)
+                      }}
+                    />
+                  </div>
+                  <div className='flex-1'>
+                    <FilterCheck
+                      dense
+                      label='No'
+                      checked={filterVerifiedNo}
+                      onChange={v => {
+                        setFilterVerifiedNo(v)
+                        setPage(0)
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <Divider />
+
+              <div className='flex flex-col gap-1'>
+                <Typography variant='overline' color='text.disabled' className='leading-none'>
+                  Master data synced today
+                </Typography>
+                <Typography variant='caption' color='text.secondary' className='mbe-1'>
+                  &quot;No&quot; = at least one credential has not synced since midnight (IST)
+                </Typography>
+                <div className='flex gap-2'>
+                  <div className='flex-1'>
+                    <FilterCheck
+                      dense
+                      label='Yes'
+                      checked={filterSyncedYes}
+                      onChange={v => {
+                        setFilterSyncedYes(v)
+                        setPage(0)
+                      }}
+                    />
+                  </div>
+                  <div className='flex-1'>
+                    <FilterCheck
+                      dense
+                      label='No'
+                      checked={filterSyncedNo}
+                      onChange={v => {
+                        setFilterSyncedNo(v)
+                        setPage(0)
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className='flex justify-end plb-3 pli-4 border-bs bg-actionHover'>
+              <Button size='small' variant='contained' onClick={() => setFilterAnchor(null)}>
+                Done
+              </Button>
+            </div>
+          </Popover>
           <Button
             variant='contained'
             color='primary'
@@ -508,6 +1057,70 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
           />
         </div>
       </div>
+      {/* Applied filters stay visible after the popover closes — otherwise a
+          filtered list looks identical to an unfiltered one and a stale filter
+          gets mistaken for missing data. Each chip removes just its own term. */}
+      {activeFilterCount > 0 && (
+        <div className='flex items-center gap-2 flex-wrap pli-6 plb-3 border-bs bg-actionHover'>
+          <Typography variant='body2' color='text.secondary'>
+            Filtered by:
+          </Typography>
+          {selectedPlatforms.map(key => (
+            <Chip
+              key={key}
+              size='small'
+              variant='tonal'
+              color='primary'
+              label={PLATFORM_LABELS.find(p => p.key === key)?.label ?? key}
+              onDelete={() => {
+                setFilterPlatforms(prev => ({ ...prev, [key]: false }))
+                setPage(0)
+              }}
+            />
+          ))}
+          {filterNoCredentials && (
+            <Chip
+              size='small'
+              variant='tonal'
+              color='primary'
+              label='No platform credentials'
+              onDelete={() => {
+                setFilterNoCredentials(false)
+                setPage(0)
+              }}
+            />
+          )}
+          {credentialVerified && (
+            <Chip
+              size='small'
+              variant='tonal'
+              color='primary'
+              label={`Verified: ${credentialVerified === 'yes' ? 'Yes' : 'No'}`}
+              onDelete={() => {
+                setFilterVerifiedYes(false)
+                setFilterVerifiedNo(false)
+                setPage(0)
+              }}
+            />
+          )}
+          {masterDataSynced && (
+            <Chip
+              size='small'
+              variant='tonal'
+              color='primary'
+              label={`Synced today: ${masterDataSynced === 'yes' ? 'Yes' : 'No'}`}
+              onDelete={() => {
+                setFilterSyncedYes(false)
+                setFilterSyncedNo(false)
+                setPage(0)
+              }}
+            />
+          )}
+          <Button size='small' color='secondary' onClick={clearFilters}>
+            Clear all
+          </Button>
+        </div>
+      )}
       <div className='overflow-x-auto'>
         <table className={tableStyles.table}>
           <thead>
@@ -555,13 +1168,29 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
             </tbody>
           ) : (
             <tbody>
-              {table.getRowModel().rows.map(row => (
-                <tr key={row.id}>
-                  {row.getVisibleCells().map(cell => (
-                    <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
-                  ))}
-                </tr>
-              ))}
+              {table.getRowModel().rows.map(row => {
+                const isOpen = Boolean(expanded[row.original.companyId])
+
+                return [
+                  <tr key={row.id}>
+                    {row.getVisibleCells().map(cell => (
+                      <td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</td>
+                    ))}
+                  </tr>,
+                  isOpen ? (
+                    <tr key={`${row.id}-detail`}>
+                      <td colSpan={row.getVisibleCells().length} className='p-0 border-bs-0'>
+                        <CredentialSyncPanel
+                          credentials={row.original.credentials}
+                          companyId={row.original.companyId}
+                          inFlight={inFlight}
+                          onSyncCredential={runSyncForCredential}
+                        />
+                      </td>
+                    </tr>
+                  ) : null
+                ]
+              })}
             </tbody>
           )}
         </table>
