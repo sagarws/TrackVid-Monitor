@@ -75,6 +75,7 @@ export type CompanyRow = {
     ajio: string
     myntra: string
     snapdeal: string
+    meesho: string
   }
   // Full per-credential breakdown, rendered when the row is expanded.
   credentials: PlatformCredentials[]
@@ -85,10 +86,15 @@ type PlatformKey = keyof CompanyRow['lastSync']
 const PLATFORM_LABELS: { key: PlatformKey; label: string }[] = [
   { key: 'ajio', label: 'Ajio' },
   { key: 'myntra', label: 'Myntra' },
-  { key: 'snapdeal', label: 'Snapdeal' }
+  { key: 'snapdeal', label: 'Snapdeal' },
+  { key: 'meesho', label: 'Meesho' }
 ]
 
-const TRACKED_PLATFORMS: PlatformKey[] = ['ajio', 'myntra', 'snapdeal']
+const TRACKED_PLATFORMS: PlatformKey[] = ['ajio', 'myntra', 'snapdeal', 'meesho']
+
+// Rows per page. The larger sizes exist so a filtered set (e.g. "not synced
+// today") can be reviewed in one screen instead of paged through.
+const PAGE_SIZE_OPTIONS = [10, 20, 50, 100, 200, 500] as const
 
 const formatPhone = (phone: any): string => {
   if (!phone?.number) return ''
@@ -128,7 +134,7 @@ const pickCredentials = (loginInfo: any): PlatformCredentials[] => {
 // lagging account is visible without expanding. '' when the platform has no
 // credentials, or none of them has ever synced.
 const rollUpLastSync = (credentials: PlatformCredentials[]): CompanyRow['lastSync'] => {
-  const out = { ajio: '', myntra: '', snapdeal: '' } as CompanyRow['lastSync']
+  const out = { ajio: '', myntra: '', snapdeal: '', meesho: '' } as CompanyRow['lastSync']
 
   for (const { key, accounts } of credentials) {
     if (!accounts.length) continue
@@ -260,86 +266,112 @@ const CredentialSyncPanel = ({
   inFlight: Set<string>
   onSyncCredential: (companyId: string, platform: PlatformKey, credentialId: string) => void
 }) => (
-  <div className='flex flex-col gap-4 plb-4 pli-6 bg-actionHover'>
-    {credentials.map(({ key, label, accounts }) => (
-      <div key={key} className='flex flex-col gap-1'>
-        <div className='flex items-center gap-2'>
-          <Typography variant='subtitle2' color='text.primary' className='uppercase tracking-wide'>
-            {label}
-          </Typography>
-          <Typography variant='caption' color='text.secondary'>
-            {accounts.length === 0
-              ? 'no accounts configured'
-              : `${accounts.filter(a => a.lastSync).length} of ${accounts.length} synced`}
-          </Typography>
-        </div>
+  // A real table rather than stacked flex rows: the account and its timestamp
+  // belong in aligned columns, otherwise they drift to opposite edges of a wide
+  // viewport and stop reading as a pair. Platform is a rowSpan cell so each
+  // marketplace reads as one block.
+  <div className='bg-actionHover plb-4 pli-6 border-bs'>
+    <div className='overflow-x-auto rounded border'>
+      <table className={tableStyles.table}>
+        <thead>
+          <tr>
+            <th className='is-[160px]'>Platform</th>
+            <th>Account</th>
+            <th className='is-[120px]'>Status</th>
+            <th className='is-[200px]'>Last sync</th>
+            <th className='is-[80px] text-center'>Sync</th>
+          </tr>
+        </thead>
+        <tbody>
+          {credentials.map(({ key, label, accounts }) => {
+            if (accounts.length === 0) {
+              return (
+                <tr key={key}>
+                  <td>
+                    <Typography variant='body2' color='text.primary' className='font-medium'>
+                      {label}
+                    </Typography>
+                  </td>
+                  <td colSpan={4}>
+                    <Typography variant='body2' color='text.disabled'>
+                      No accounts configured
+                    </Typography>
+                  </td>
+                </tr>
+              )
+            }
 
-        {accounts.length > 0 && (
-          <div className='flex flex-col'>
-            {accounts.map(acc => (
-              <div
-                key={acc.credentialId || acc.username}
-                className='flex items-center justify-between gap-4 plb-1.5 border-bs first:border-bs-0'
-              >
-                <div className='flex items-center gap-2 min-is-0'>
-                  <Typography variant='body2' color='text.primary' className='truncate'>
-                    {acc.username}
-                  </Typography>
-                  {/* An unverified credential is skipped by the sync jobs
-                      entirely, which explains a date that never advances. */}
-                  {!acc.isVerified && (
-                    <Tooltip title='Credential marked unverified — the sync jobs skip it until it is re-verified'>
-                      <span className='flex items-center gap-1 text-warning'>
-                        <i className='tabler-alert-triangle text-sm' />
-                        <Typography variant='caption' color='warning.main'>
-                          unverified
-                        </Typography>
+            const syncedCount = accounts.filter(a => a.lastSync).length
+
+            return accounts.map((acc, i) => {
+              const busy = inFlight.has(`${companyId}:${key}:${acc.credentialId}`)
+
+              return (
+                <tr key={acc.credentialId || `${key}-${acc.username}`}>
+                  {i === 0 && (
+                    <td rowSpan={accounts.length} className='align-top'>
+                      <Typography variant='body2' color='text.primary' className='font-medium'>
+                        {label}
+                      </Typography>
+                      <Typography
+                        variant='caption'
+                        color={syncedCount === accounts.length ? 'success.main' : 'text.secondary'}
+                      >
+                        {syncedCount} of {accounts.length} synced
+                      </Typography>
+                    </td>
+                  )}
+                  <td>
+                    <Typography variant='body2' color='text.primary' className='break-all'>
+                      {acc.username}
+                    </Typography>
+                  </td>
+                  <td>
+                    {acc.isVerified ? (
+                      <Chip size='small' variant='tonal' color='success' label='Verified' />
+                    ) : (
+                      // An unverified credential is skipped by the sync jobs
+                      // entirely, which is usually why its date never advances.
+                      <Tooltip title='Credential marked unverified — the sync jobs skip it until it is re-verified'>
+                        <Chip size='small' variant='tonal' color='warning' label='Unverified' />
+                      </Tooltip>
+                    )}
+                  </td>
+                  <td>
+                    <Typography
+                      variant='body2'
+                      color={acc.lastSync ? 'text.secondary' : 'text.disabled'}
+                      className='whitespace-nowrap tabular-nums'
+                    >
+                      {acc.lastSync ? formatSyncDate(acc.lastSync) : 'Never synced'}
+                    </Typography>
+                  </td>
+                  <td className='text-center'>
+                    <Tooltip
+                      title={
+                        acc.credentialId
+                          ? `Sync only ${acc.username}`
+                          : 'Credential has no id — cannot sync individually'
+                      }
+                    >
+                      <span>
+                        <IconButton
+                          size='small'
+                          disabled={busy || !acc.credentialId || !companyId}
+                          onClick={() => onSyncCredential(companyId, key, acc.credentialId)}
+                        >
+                          {busy ? <CircularProgress size={14} /> : <i className='tabler-refresh text-base' />}
+                        </IconButton>
                       </span>
                     </Tooltip>
-                  )}
-                </div>
-                <div className='flex items-center gap-1 whitespace-nowrap'>
-                  <Typography
-                    variant='body2'
-                    color={acc.lastSync ? 'text.secondary' : 'text.disabled'}
-                    className='tabular-nums'
-                  >
-                    {acc.lastSync ? formatSyncDate(acc.lastSync) : 'never synced'}
-                  </Typography>
-                  {(() => {
-                    const busy = inFlight.has(`${companyId}:${key}:${acc.credentialId}`)
-
-                    return (
-                      <Tooltip
-                        title={
-                          acc.credentialId
-                            ? `Sync only ${acc.username}`
-                            : 'Credential has no id — cannot sync individually'
-                        }
-                      >
-                        <span>
-                          <IconButton
-                            size='small'
-                            disabled={busy || !acc.credentialId || !companyId}
-                            onClick={() => onSyncCredential(companyId, key, acc.credentialId)}
-                          >
-                            {busy ? (
-                              <CircularProgress size={14} />
-                            ) : (
-                              <i className='tabler-refresh text-base' />
-                            )}
-                          </IconButton>
-                        </span>
-                      </Tooltip>
-                    )
-                  })()}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    ))}
+                  </td>
+                </tr>
+              )
+            })
+          })}
+        </tbody>
+      </table>
+    </div>
   </div>
 )
 
@@ -361,7 +393,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   const [dialogPlatforms, setDialogPlatforms] = useState<Record<PlatformKey, boolean>>({
     ajio: true,
     myntra: false,
-    snapdeal: false
+    snapdeal: false,
+    meesho: false
   })
   const [dialogSubmitting, setDialogSubmitting] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
@@ -373,7 +406,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   const [filterPlatforms, setFilterPlatforms] = useState<Record<PlatformKey, boolean>>({
     ajio: false,
     myntra: false,
-    snapdeal: false
+    snapdeal: false,
+    meesho: false
   })
   const [filterNoCredentials, setFilterNoCredentials] = useState(false)
   // Yes/No are independent checkboxes; both (or neither) ticked means "don't care".
@@ -381,6 +415,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   const [filterVerifiedNo, setFilterVerifiedNo] = useState(false)
   const [filterSyncedYes, setFilterSyncedYes] = useState(false)
   const [filterSyncedNo, setFilterSyncedNo] = useState(false)
+  const [filterUsingMdYes, setFilterUsingMdYes] = useState(false)
+  const [filterUsingMdNo, setFilterUsingMdNo] = useState(false)
   const [filterAnchor, setFilterAnchor] = useState<null | HTMLElement>(null)
 
   const selectedPlatforms = useMemo(
@@ -401,19 +437,28 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     return filterSyncedYes ? 'yes' : 'no'
   }, [filterSyncedYes, filterSyncedNo])
 
+  const isUsingMasterData = useMemo<'yes' | 'no' | undefined>(() => {
+    if (filterUsingMdYes === filterUsingMdNo) return undefined
+
+    return filterUsingMdYes ? 'yes' : 'no'
+  }, [filterUsingMdYes, filterUsingMdNo])
+
   const activeFilterCount =
     selectedPlatforms.length +
     (filterNoCredentials ? 1 : 0) +
     (credentialVerified ? 1 : 0) +
-    (masterDataSynced ? 1 : 0)
+    (masterDataSynced ? 1 : 0) +
+    (isUsingMasterData ? 1 : 0)
 
   const clearFilters = useCallback(() => {
-    setFilterPlatforms({ ajio: false, myntra: false, snapdeal: false })
+    setFilterPlatforms({ ajio: false, myntra: false, snapdeal: false, meesho: false })
     setFilterNoCredentials(false)
     setFilterVerifiedYes(false)
     setFilterVerifiedNo(false)
     setFilterSyncedYes(false)
     setFilterSyncedNo(false)
+    setFilterUsingMdYes(false)
+    setFilterUsingMdNo(false)
     setPage(0)
   }, [])
 
@@ -456,7 +501,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
           ...(selectedPlatforms.length ? { platforms: selectedPlatforms } : {}),
           ...(filterNoCredentials ? { noPlatformCredentials: true } : {}),
           ...(credentialVerified ? { credentialVerified } : {}),
-          ...(masterDataSynced ? { masterDataSynced } : {})
+          ...(masterDataSynced ? { masterDataSynced } : {}),
+          ...(isUsingMasterData ? { isUsingMasterData } : {})
         })
       })
 
@@ -494,7 +540,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     selectedPlatforms,
     filterNoCredentials,
     credentialVerified,
-    masterDataSynced
+    masterDataSynced,
+    isUsingMasterData
   ])
 
   useEffect(() => {
@@ -843,11 +890,13 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
             setPageSize(Number(e.target.value))
             setPage(0)
           }}
-          className='max-sm:is-full sm:is-[70px]'
+          className='max-sm:is-full sm:is-[90px]'
         >
-          <MenuItem value='10'>10</MenuItem>
-          <MenuItem value='25'>25</MenuItem>
-          <MenuItem value='50'>50</MenuItem>
+          {PAGE_SIZE_OPTIONS.map(size => (
+            <MenuItem key={size} value={String(size)}>
+              {size}
+            </MenuItem>
+          ))}
         </CustomTextField>
         <div className='flex items-center gap-3 flex-wrap max-sm:is-full'>
           {/* Match count for the current search + filters. Sits next to the
@@ -922,6 +971,41 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
             </div>
 
             <div className='flex flex-col gap-4 plb-4 pli-4 max-bs-[60vh] overflow-y-auto'>
+              <div className='flex flex-col gap-1'>
+                <Typography variant='overline' color='text.disabled' className='leading-none'>
+                  Using master data
+                </Typography>
+                <Typography variant='caption' color='text.secondary' className='mbe-1'>
+                  settings.isUsingMasterData — only these companies are picked up by the sync jobs
+                </Typography>
+                <div className='flex gap-2'>
+                  <div className='flex-1'>
+                    <FilterCheck
+                      dense
+                      label='Yes'
+                      checked={filterUsingMdYes}
+                      onChange={v => {
+                        setFilterUsingMdYes(v)
+                        setPage(0)
+                      }}
+                    />
+                  </div>
+                  <div className='flex-1'>
+                    <FilterCheck
+                      dense
+                      label='No'
+                      checked={filterUsingMdNo}
+                      onChange={v => {
+                        setFilterUsingMdNo(v)
+                        setPage(0)
+                      }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <Divider />
+
               <div className='flex flex-col gap-1'>
                 <Typography variant='overline' color='text.disabled' className='leading-none'>
                   Platform
@@ -1112,6 +1196,19 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
               onDelete={() => {
                 setFilterSyncedYes(false)
                 setFilterSyncedNo(false)
+                setPage(0)
+              }}
+            />
+          )}
+          {isUsingMasterData && (
+            <Chip
+              size='small'
+              variant='tonal'
+              color='primary'
+              label={`Using master data: ${isUsingMasterData === 'yes' ? 'Yes' : 'No'}`}
+              onDelete={() => {
+                setFilterUsingMdYes(false)
+                setFilterUsingMdNo(false)
                 setPage(0)
               }}
             />

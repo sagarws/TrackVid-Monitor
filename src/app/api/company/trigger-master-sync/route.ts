@@ -1,6 +1,6 @@
 // Server-side proxy from the Monitor to TrackVid-BE. Reads the SystemAdmin
 // access token from the NextAuth session (kept out of the browser) and
-// forwards the { companyIds, platforms } body to
+// forwards the { companyIds, platforms, credentialIds? } body to
 // POST {TRACKVID_API_URL}/system-admin/trigger-master-sync.
 
 import { NextResponse } from 'next/server'
