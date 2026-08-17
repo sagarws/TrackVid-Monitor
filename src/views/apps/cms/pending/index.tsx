@@ -6,14 +6,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 // MUI Imports
 import Card from '@mui/material/Card'
 import CardHeader from '@mui/material/CardHeader'
+import Checkbox from '@mui/material/Checkbox'
 import IconButton from '@mui/material/IconButton'
 import MenuItem from '@mui/material/MenuItem'
 import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
 import Alert from '@mui/material/Alert'
+import AlertTitle from '@mui/material/AlertTitle'
+import Button from '@mui/material/Button'
 import CircularProgress from '@mui/material/CircularProgress'
+import Dialog from '@mui/material/Dialog'
+import DialogTitle from '@mui/material/DialogTitle'
+import DialogContent from '@mui/material/DialogContent'
+import DialogActions from '@mui/material/DialogActions'
 import Pagination from '@mui/material/Pagination'
+import Snackbar from '@mui/material/Snackbar'
 import Chip from '@mui/material/Chip'
+import Divider from '@mui/material/Divider'
 
 // Third-party Imports
 import classnames from 'classnames'
@@ -77,6 +86,35 @@ const SORT_OPTIONS = [
 
 type SortKey = (typeof SORT_OPTIONS)[number]['key']
 
+// Mirrors the MAX_IDS guard in runReturnScriptByIds. Checked here too so a
+// select-all across a busy marketplace is refused before the round-trip.
+const MAX_PROCESS_IDS = 2000
+
+// CMS_SCRIPT_STATUS, in the BE's own casing — /cms/change-script-status
+// validates both ends of the flip against this exact set.
+const SCRIPT_STATUSES = [
+  'Not Started',
+  'Queued',
+  'Running',
+  'Success',
+  'Help Center Failed',
+  'Failed',
+  'Completed'
+] as const
+
+// Sentinel for "the field is missing or null", which the BE accepts as
+// currentStatus but cannot be expressed as a Select value.
+const NO_STATUS = '__no_status__'
+
+// Statuses the BE refuses to re-dispatch (RUNNING / SUCCESS / QUEUED). Such
+// claims stay selectable — "Change Status" exists precisely to un-stick them —
+// but they are counted separately so the Process button never claims it will
+// run something the server is going to skip.
+const BLOCKING_STATUSES = new Set(['running', 'success', 'queued'])
+
+const isProcessable = (claim: PendingClaim) =>
+  Boolean(claim.claimId) && !BLOCKING_STATUSES.has((claim.scriptProcessingStatus ?? '').trim().toLowerCase())
+
 type PendingResponse = {
   isSuccess: boolean
   displayMessage?: string
@@ -86,6 +124,54 @@ type PendingResponse = {
     metadata?: { total?: number; totalPage?: number; page?: number; limit?: number }
   }
 }
+
+type RunJob = {
+  companyId: string
+  companyName?: string
+  jobId?: string | number
+  jobState?: string
+  status?: string
+  queuePosition?: number
+  totalInQueue?: number
+  existing?: boolean
+  cmsIds?: string[]
+}
+
+type RunSkipped = {
+  notFound?: string[]
+  alreadyProcessing?: string[]
+  drivePending?: string[]
+  perCompanyErrors?: { companyId: string; companyName?: string; reason: string; cmsIds: string[] }[]
+}
+
+type RunResponse = {
+  isSuccess: boolean
+  displayMessage?: string
+  message?: string
+  data?: { jobs?: RunJob[]; skipped?: RunSkipped }
+}
+
+type StatusChangeResponse = {
+  isSuccess: boolean
+  displayMessage?: string
+  message?: string
+  data?: {
+    matched?: number
+    modified?: number
+    currentStatus?: string | null
+    newStatus?: string
+    eCommercePlatform?: string
+    companyIds?: string[]
+    invalidIds?: string[]
+  } | null
+}
+
+type Toast = { severity: 'success' | 'error' | 'warning' | 'info'; message: string }
+
+// A claim is selected by id; its company is carried along so the confirm dialog
+// can still name the companies after a page change, and `processable` so the
+// dispatchable count survives too.
+type SelectedClaim = { companyId: string; companyName: string; processable: boolean }
 
 type Props = {
   impersonateBaseUrl: string
@@ -146,12 +232,38 @@ const summarizeStatuses = (claims: PendingClaim[]) => {
 // platform, with the script's own status and error text. The error is the
 // column ops actually acts on, so it gets the widest cell and a tooltip with
 // the untruncated message.
-const PendingClaimsPanel = ({ claims }: { claims: PendingClaim[] }) => (
+//
+// `width` is the measured pixel width of the outer table scroller. It is set
+// explicitly because a table cell is sized from its content's max-content
+// width: without it this panel would stretch the *company* table to ~1600px
+// and push the Action column off-screen (the outer scrollbar then sits below
+// a 500px-tall panel, effectively out of reach). With a definite width the
+// panel owns its own horizontal scrollbar and the company table keeps fitting.
+const PendingClaimsPanel = ({
+  claims,
+  companyId,
+  companyName,
+  width,
+  selected,
+  onToggleClaim
+}: {
+  claims: PendingClaim[]
+  companyId: string
+  companyName: string
+  width: number
+  selected: Record<string, SelectedClaim>
+  onToggleClaim: (claim: PendingClaim, companyId: string, companyName: string) => void
+}) => (
   <div className='bg-actionHover plb-4 pli-6 border-bs'>
-    <div className='overflow-auto rounded border max-bs-[520px]'>
+    <div
+      className='overflow-auto rounded border max-bs-[520px]'
+      // pli-6 on the wrapper = 24px of padding either side.
+      style={width ? { inlineSize: Math.max(240, width - 48) } : undefined}
+    >
       <table className={tableStyles.table}>
         <thead>
           <tr>
+            <th className='is-[52px]' />
             <th className='is-[60px]'>#</th>
             <th className='is-[170px]'>AWB</th>
             <th className='is-[170px]'>Forward AWB</th>
@@ -165,69 +277,91 @@ const PendingClaimsPanel = ({ claims }: { claims: PendingClaim[] }) => (
           </tr>
         </thead>
         <tbody>
-          {claims.map((claim, i) => (
-            <tr key={claim.claimId || `${claim.AWBNumber}-${i}`}>
-              <td>
-                <Typography variant='body2' color='text.disabled' className='tabular-nums'>
-                  {i + 1}
-                </Typography>
-              </td>
-              <td>
-                <Typography variant='body2' color='text.primary' className='font-medium break-all'>
-                  {claim.AWBNumber || '—'}
-                </Typography>
-              </td>
-              <td>
-                <Typography variant='body2' className='break-all'>
-                  {claim.forwardAWB || '—'}
-                </Typography>
-              </td>
-              <td>
-                <Typography variant='body2' className='break-all'>
-                  {claim.subOrderNumber || '—'}
-                </Typography>
-              </td>
-              <td>
-                <Typography variant='body2'>{claim.typeOfReason || '—'}</Typography>
-              </td>
-              <td>
-                <Typography variant='body2' className='break-all'>
-                  {claim.username || '—'}
-                </Typography>
-              </td>
-              <td>
-                <Typography variant='body2' color='text.secondary' className='whitespace-nowrap tabular-nums'>
-                  {claim.createdAt || '—'}
-                </Typography>
-              </td>
-              <td className='text-center'>
-                <Typography variant='body2' className='tabular-nums'>
-                  {claim.processCount}
-                </Typography>
-              </td>
-              <td>
-                <Chip
-                  size='small'
-                  variant='tonal'
-                  color={statusColor(claim.scriptProcessingStatus)}
-                  label={claim.scriptProcessingStatus?.trim() || 'No status'}
-                />
-              </td>
-              <td>
-                {claim.scriptProcessingError ? (
-                  <Tooltip title={claim.scriptProcessingError}>
-                    <Typography variant='body2' color='error.main' className='min-is-[220px]'>
-                      {claim.scriptProcessingError}
-                    </Typography>
+          {claims.map((claim, i) => {
+            const processable = isProcessable(claim)
+
+            return (
+              <tr key={claim.claimId || `${claim.AWBNumber}-${i}`}>
+                <td>
+                  <Tooltip
+                    title={
+                      processable
+                        ? 'Select this claim'
+                        : `${claim.scriptProcessingStatus?.trim() || 'In progress'} — Process skips it; use Change Status to reset it first`
+                    }
+                  >
+                    <span>
+                      <Checkbox
+                        size='small'
+                        disabled={!claim.claimId}
+                        checked={Boolean(selected[claim.claimId])}
+                        onChange={() => onToggleClaim(claim, companyId, companyName)}
+                      />
+                    </span>
                   </Tooltip>
-                ) : (
-                  <Typography variant='body2' color='text.disabled'>
-                    —
+                </td>
+                <td>
+                  <Typography variant='body2' color='text.disabled' className='tabular-nums'>
+                    {i + 1}
                   </Typography>
-                )}
-              </td>
-            </tr>
-          ))}
+                </td>
+                <td>
+                  <Typography variant='body2' color='text.primary' className='font-medium break-all'>
+                    {claim.AWBNumber || '—'}
+                  </Typography>
+                </td>
+                <td>
+                  <Typography variant='body2' className='break-all'>
+                    {claim.forwardAWB || '—'}
+                  </Typography>
+                </td>
+                <td>
+                  <Typography variant='body2' className='break-all'>
+                    {claim.subOrderNumber || '—'}
+                  </Typography>
+                </td>
+                <td>
+                  <Typography variant='body2'>{claim.typeOfReason || '—'}</Typography>
+                </td>
+                <td>
+                  <Typography variant='body2' className='break-all'>
+                    {claim.username || '—'}
+                  </Typography>
+                </td>
+                <td>
+                  <Typography variant='body2' color='text.secondary' className='whitespace-nowrap tabular-nums'>
+                    {claim.createdAt || '—'}
+                  </Typography>
+                </td>
+                <td className='text-center'>
+                  <Typography variant='body2' className='tabular-nums'>
+                    {claim.processCount}
+                  </Typography>
+                </td>
+                <td>
+                  <Chip
+                    size='small'
+                    variant='tonal'
+                    color={statusColor(claim.scriptProcessingStatus)}
+                    label={claim.scriptProcessingStatus?.trim() || 'No status'}
+                  />
+                </td>
+                <td>
+                  {claim.scriptProcessingError ? (
+                    <Tooltip title={claim.scriptProcessingError}>
+                      <Typography variant='body2' color='error.main' className='min-is-[220px]'>
+                        {claim.scriptProcessingError}
+                      </Typography>
+                    </Tooltip>
+                  ) : (
+                    <Typography variant='body2' color='text.disabled'>
+                      —
+                    </Typography>
+                  )}
+                </td>
+              </tr>
+            )
+          })}
         </tbody>
       </table>
     </div>
@@ -248,6 +382,49 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+
+  const [selected, setSelected] = useState<Record<string, SelectedClaim>>({})
+  const [processDialogOpen, setProcessDialogOpen] = useState(false)
+  const [processing, setProcessing] = useState(false)
+  const [runResult, setRunResult] = useState<RunResponse | null>(null)
+  const [toast, setToast] = useState<Toast | null>(null)
+
+  // ── Bulk script-status change ───────────────────────────────────────────
+  // Defaults match the BE's own defaults and the flow this exists for:
+  // un-stick claims left "Queued" by a runner that died, so they can be
+  // dispatched again.
+  const [statusDialogOpen, setStatusDialogOpen] = useState(false)
+  const [statusFrom, setStatusFrom] = useState<string>('Queued')
+  const [statusTo, setStatusTo] = useState<string>('Not Started')
+  const [statusSubmitting, setStatusSubmitting] = useState(false)
+  const [statusResult, setStatusResult] = useState<StatusChangeResponse | null>(null)
+
+  // Measured width of the table's horizontal scroller, handed to the expanded
+  // panel so it scrolls on its own instead of widening the company table.
+  const scrollerRef = useRef<HTMLDivElement | null>(null)
+  const [scrollerWidth, setScrollerWidth] = useState(0)
+
+  useEffect(() => {
+    const el = scrollerRef.current
+
+    if (!el || typeof ResizeObserver === 'undefined') return
+
+    const update = () => {
+      const next = el.clientWidth
+
+      // Threshold guard: the panel is a child of the element being measured, so
+      // a 1px jitter (scrollbar appearing/disappearing) must not loop forever.
+      setScrollerWidth(prev => (Math.abs(prev - next) > 2 ? next : prev))
+    }
+
+    update()
+
+    const ro = new ResizeObserver(update)
+
+    ro.observe(el)
+
+    return () => ro.disconnect()
+  }, [])
 
   const toggleExpanded = useCallback((companyId: string) => {
     setExpanded(prev => ({ ...prev, [companyId]: !prev[companyId] }))
@@ -326,12 +503,262 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
     [impersonateBaseUrl]
   )
 
+  // ── Selection ───────────────────────────────────────────────────────────
+  // Keyed by claimId, because that is what /cms/run-return-script takes. A
+  // company checkbox is a shorthand for "all of its processable claims", which
+  // keeps one selection model instead of two that can disagree.
+  const toggleClaim = useCallback((claim: PendingClaim, companyId: string, companyName: string) => {
+    if (!claim.claimId) return
+    setSelected(prev => {
+      const next = { ...prev }
+
+      if (next[claim.claimId]) delete next[claim.claimId]
+      else next[claim.claimId] = { companyId, companyName, processable: isProcessable(claim) }
+
+      return next
+    })
+  }, [])
+
+  const toggleCompany = useCallback((row: PendingCompanyRow) => {
+    const claims = row.claims.filter(c => c.claimId)
+
+    if (!claims.length) return
+
+    setSelected(prev => {
+      const next = { ...prev }
+      const allOn = claims.every(c => next[c.claimId])
+
+      for (const claim of claims) {
+        if (allOn) delete next[claim.claimId]
+        else
+          next[claim.claimId] = {
+            companyId: row.companyId,
+            companyName: row.companyName,
+            processable: isProcessable(claim)
+          }
+      }
+
+      return next
+    })
+  }, [])
+
+  const pageClaims = useMemo(
+    () =>
+      rows.flatMap(row =>
+        row.claims.filter(c => c.claimId).map(claim => ({ claim, companyId: row.companyId, companyName: row.companyName }))
+      ),
+    [rows]
+  )
+
+  const pageAllSelected = useMemo(
+    () => pageClaims.length > 0 && pageClaims.every(({ claim }) => selected[claim.claimId]),
+    [pageClaims, selected]
+  )
+
+  const pageSomeSelected = useMemo(
+    () => pageClaims.some(({ claim }) => selected[claim.claimId]),
+    [pageClaims, selected]
+  )
+
+  const toggleAllOnPage = useCallback(() => {
+    setSelected(prev => {
+      const next = { ...prev }
+
+      for (const { claim, companyId, companyName } of pageClaims) {
+        if (pageAllSelected) delete next[claim.claimId]
+        else next[claim.claimId] = { companyId, companyName, processable: isProcessable(claim) }
+      }
+
+      return next
+    })
+  }, [pageClaims, pageAllSelected])
+
+  const selectedIds = useMemo(() => Object.keys(selected), [selected])
+
+  // What Process actually sends: the rest would be skipped server-side.
+  const processableSelectedIds = useMemo(() => selectedIds.filter(id => selected[id].processable), [selectedIds, selected])
+
+  const blockedSelectedCount = selectedIds.length - processableSelectedIds.length
+
+  // Distinct companies behind the selected claims. /cms/change-script-status is
+  // company-scoped, so this is what it receives.
+  const selectedCompanies = useMemo(() => {
+    const byId = new Map<string, string>()
+
+    for (const id of selectedIds) {
+      const { companyId, companyName } = selected[id]
+
+      if (companyId) byId.set(companyId, companyName)
+    }
+
+    return Array.from(byId, ([companyId, companyName]) => ({ companyId, companyName }))
+  }, [selectedIds, selected])
+
+  const selectedCompanyNames = useMemo(() => selectedCompanies.map(c => c.companyName), [selectedCompanies])
+
+  const runProcessClaims = async () => {
+    if (processableSelectedIds.length === 0) return
+
+    if (processableSelectedIds.length > MAX_PROCESS_IDS) {
+      setToast({
+        severity: 'warning',
+        message: `Select at most ${MAX_PROCESS_IDS} claims per run (${processableSelectedIds.length} selected).`
+      })
+
+      return
+    }
+
+    setProcessing(true)
+    setRunResult(null)
+
+    try {
+      const res = await fetch('/api/cms/run-return-script', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: processableSelectedIds })
+      })
+
+      const json = (await res.json().catch(() => null)) as RunResponse | null
+
+      if (!json) {
+        setToast({ severity: 'error', message: `Request failed (${res.status})` })
+
+        return
+      }
+
+      setRunResult(json)
+
+      const dispatched = json.data?.jobs?.length ?? 0
+
+      if (json.isSuccess && dispatched > 0) {
+        // Only clear on a real dispatch: keeping the selection after a failure
+        // lets ops retry the same batch without re-ticking every row.
+        setSelected({})
+        setToast({ severity: 'success', message: json.displayMessage || `Dispatched ${dispatched} job(s)` })
+      } else {
+        setToast({ severity: 'warning', message: json.displayMessage || json.message || 'No jobs were dispatched' })
+      }
+
+      fetchRows()
+    } catch (err: any) {
+      setToast({ severity: 'error', message: err?.message || 'Process request failed' })
+    } finally {
+      setProcessing(false)
+    }
+  }
+
+  const closeProcessDialog = () => {
+    if (processing) return
+    setProcessDialogOpen(false)
+    setRunResult(null)
+  }
+
+  const runChangeStatus = async () => {
+    if (selectedCompanies.length === 0) return
+
+    setStatusSubmitting(true)
+    setStatusResult(null)
+
+    try {
+      const res = await fetch('/api/cms/change-script-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          companyIds: selectedCompanies.map(c => c.companyId),
+          // null is meaningful here — it targets rows whose status field is
+          // missing entirely, which is a different set from any named status.
+          currentStatus: statusFrom === NO_STATUS ? null : statusFrom,
+          newStatus: statusTo,
+          eCommercePlatform: platform
+        })
+      })
+
+      const json = (await res.json().catch(() => null)) as StatusChangeResponse | null
+
+      if (!json) {
+        setToast({ severity: 'error', message: `Request failed (${res.status})` })
+
+        return
+      }
+
+      setStatusResult(json)
+
+      if (json.isSuccess) {
+        const modified = json.data?.modified ?? 0
+
+        setToast({
+          severity: modified > 0 ? 'success' : 'warning',
+          message:
+            modified > 0
+              ? `${modified.toLocaleString('en-IN')} claim${modified === 1 ? '' : 's'} set to ${statusTo}`
+              : 'No claims matched — nothing was changed'
+        })
+      } else {
+        setToast({ severity: 'error', message: json.displayMessage || json.message || 'Status change failed' })
+      }
+
+      // The flip changes what is selectable (a reset row becomes processable),
+      // so the list is reloaded even when nothing matched.
+      fetchRows()
+    } catch (err: any) {
+      setToast({ severity: 'error', message: err?.message || 'Status change failed' })
+    } finally {
+      setStatusSubmitting(false)
+    }
+  }
+
+  const closeStatusDialog = () => {
+    if (statusSubmitting) return
+    setStatusDialogOpen(false)
+    setStatusResult(null)
+  }
+
   // Total pending claims across the companies on this page — the page-level
   // number the platform filter is actually judged by.
   const pageClaimTotal = useMemo(() => rows.reduce((n, r) => n + r.pendingCount, 0), [rows])
 
   const columns = useMemo<ColumnDef<PendingCompanyRow, any>[]>(
     () => [
+      {
+        id: 'select',
+        header: () => (
+          <Tooltip title='Select every claim on this page'>
+            <span>
+              <Checkbox
+                disabled={pageClaims.length === 0}
+                checked={pageAllSelected}
+                indeterminate={!pageAllSelected && pageSomeSelected}
+                onChange={toggleAllOnPage}
+              />
+            </span>
+          </Tooltip>
+        ),
+        enableSorting: false,
+        cell: ({ row }) => {
+          const claims = row.original.claims.filter(c => c.claimId)
+          const selectedCount = claims.filter(c => selected[c.claimId]).length
+          const allOn = claims.length > 0 && selectedCount === claims.length
+
+          return (
+            <Tooltip
+              title={
+                claims.length === 0
+                  ? 'No claims to select'
+                  : `${selectedCount} of ${claims.length} claim${claims.length === 1 ? '' : 's'} selected`
+              }
+            >
+              <span>
+                <Checkbox
+                  disabled={claims.length === 0}
+                  checked={allOn}
+                  indeterminate={!allOn && selectedCount > 0}
+                  onChange={() => toggleCompany(row.original)}
+                />
+              </span>
+            </Tooltip>
+          )
+        }
+      },
       {
         id: 'expander',
         header: () => null,
@@ -462,7 +889,17 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
         )
       }
     ],
-    [expanded, toggleExpanded, openImpersonate]
+    [
+      expanded,
+      toggleExpanded,
+      openImpersonate,
+      selected,
+      toggleCompany,
+      toggleAllOnPage,
+      pageAllSelected,
+      pageSomeSelected,
+      pageClaims
+    ]
   )
 
   const table = useReactTable({
@@ -475,6 +912,9 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   const rangeStart = total === 0 ? 0 : page * pageSize + 1
   const rangeEnd = Math.min((page + 1) * pageSize, total)
   const platformLabel = PLATFORMS.find(p => p.key === platform)?.label ?? platform
+
+  const jobs = runResult?.data?.jobs ?? []
+  const skipped = runResult?.data?.skipped
 
   return (
     <Card>
@@ -511,9 +951,11 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
             onChange={e => {
               setPlatform(e.target.value as PlatformKey)
               setPage(0)
-              // Expanded panels belong to the previous platform's claims —
-              // keeping them open would re-open unrelated rows by companyId.
+              // Expanded panels and the selection belong to the previous
+              // platform's claims — carrying either over would act on rows the
+              // user can no longer see.
               setExpanded({})
+              setSelected({})
             }}
             className='max-sm:is-full sm:is-[160px]'
           >
@@ -556,6 +998,38 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
               {!loading && pageClaimTotal > 0 ? ` • ${pageClaimTotal.toLocaleString('en-IN')} claims on this page` : ''}
             </Typography>
           </div>
+          <Tooltip title='Bulk-reset scriptProcessingStatus for the selected companies'>
+            <span>
+              <Button
+                variant='outlined'
+                color='secondary'
+                startIcon={<i className='tabler-refresh-dot' />}
+                disabled={selectedCompanies.length === 0}
+                onClick={() => setStatusDialogOpen(true)}
+              >
+                Change Status{selectedCompanies.length ? ` (${selectedCompanies.length})` : ''}
+              </Button>
+            </span>
+          </Tooltip>
+          <Tooltip
+            title={
+              selectedIds.length > 0 && processableSelectedIds.length === 0
+                ? 'Every selected claim is queued, running or successful — reset them with Change Status first'
+                : 'Run the auto-claim script for the selected claims'
+            }
+          >
+            <span>
+              <Button
+                variant='contained'
+                color='primary'
+                startIcon={<i className='tabler-player-play' />}
+                disabled={processableSelectedIds.length === 0}
+                onClick={() => setProcessDialogOpen(true)}
+              >
+                Process Claim{processableSelectedIds.length ? ` (${processableSelectedIds.length})` : ''}
+              </Button>
+            </span>
+          </Tooltip>
           <CustomTextField
             value={search}
             onChange={e => setSearch(e.target.value)}
@@ -564,7 +1038,31 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
           />
         </div>
       </div>
-      <div className='overflow-x-auto'>
+      {selectedIds.length > 0 && (
+        <div className='flex items-center gap-2 flex-wrap pli-6 plb-3 border-bs bg-actionHover'>
+          <Typography variant='body2' color='text.secondary'>
+            Selected:
+          </Typography>
+          <Typography variant='body2' color='primary.main' className='font-medium tabular-nums'>
+            {selectedIds.length.toLocaleString('en-IN')} claim{selectedIds.length === 1 ? '' : 's'}
+          </Typography>
+          <Typography variant='body2' color='text.secondary'>
+            across {selectedCompanies.length} compan{selectedCompanies.length === 1 ? 'y' : 'ies'}
+          </Typography>
+          {blockedSelectedCount > 0 && (
+            <Chip
+              size='small'
+              variant='tonal'
+              color='warning'
+              label={`${blockedSelectedCount} not dispatchable`}
+            />
+          )}
+          <Button size='small' color='secondary' onClick={() => setSelected({})}>
+            Clear selection
+          </Button>
+        </div>
+      )}
+      <div ref={scrollerRef} className='overflow-x-auto'>
         <table className={tableStyles.table}>
           <thead>
             {table.getHeaderGroups().map(headerGroup => (
@@ -609,7 +1107,14 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
                   isOpen ? (
                     <tr key={`${row.id}-detail`}>
                       <td colSpan={row.getVisibleCells().length} className='p-0 border-bs-0'>
-                        <PendingClaimsPanel claims={row.original.claims} />
+                        <PendingClaimsPanel
+                          claims={row.original.claims}
+                          companyId={row.original.companyId}
+                          companyName={row.original.companyName}
+                          width={scrollerWidth}
+                          selected={selected}
+                          onToggleClaim={toggleClaim}
+                        />
                       </td>
                     </tr>
                   ) : null
@@ -632,6 +1137,266 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
           showLastButton
         />
       </div>
+
+      <Dialog open={processDialogOpen} onClose={closeProcessDialog} maxWidth='sm' fullWidth>
+        <DialogTitle>Process Claim</DialogTitle>
+        <DialogContent>
+          {runResult ? (
+            // Result view. The BE partially succeeds by design (per-company
+            // dispatch), so every bucket it reports is shown rather than
+            // collapsed into one success/failure line.
+            <div className='flex flex-col gap-4'>
+              <Alert severity={jobs.length > 0 ? 'success' : 'warning'}>
+                <AlertTitle>{runResult.displayMessage || runResult.message || 'Run submitted'}</AlertTitle>
+                {jobs.length > 0
+                  ? `${jobs.length} job${jobs.length === 1 ? '' : 's'} dispatched.`
+                  : 'Nothing was dispatched.'}
+              </Alert>
+              {jobs.length > 0 && (
+                <div className='flex flex-col gap-2'>
+                  {jobs.map(job => (
+                    <div key={`${job.companyId}-${job.jobId}`} className='flex flex-col gap-0.5 rounded border plb-2 pli-3'>
+                      <div className='flex items-center gap-2 flex-wrap'>
+                        <Typography color='text.primary' className='font-medium'>
+                          {job.companyName || job.companyId}
+                        </Typography>
+                        <Chip
+                          size='small'
+                          variant='tonal'
+                          color={job.existing ? 'info' : job.status === 'queued' ? 'warning' : 'success'}
+                          label={job.existing ? 'Already running' : job.status || job.jobState || 'dispatched'}
+                        />
+                      </div>
+                      <Typography variant='caption' color='text.secondary'>
+                        {job.cmsIds?.length ?? 0} claim{(job.cmsIds?.length ?? 0) === 1 ? '' : 's'}
+                        {job.jobId ? ` • job ${job.jobId}` : ''}
+                        {typeof job.queuePosition === 'number'
+                          ? ` • queue position ${job.queuePosition}${job.totalInQueue ? ` of ${job.totalInQueue}` : ''}`
+                          : ''}
+                      </Typography>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {skipped && (
+                <>
+                  <Divider />
+                  <div className='flex flex-col gap-1'>
+                    <Typography variant='overline' color='text.disabled' className='leading-none'>
+                      Skipped
+                    </Typography>
+                    {(skipped.alreadyProcessing?.length ?? 0) > 0 && (
+                      <Typography variant='body2' color='text.secondary'>
+                        {skipped.alreadyProcessing!.length} already queued, running, successful or ticketed
+                      </Typography>
+                    )}
+                    {(skipped.drivePending?.length ?? 0) > 0 && (
+                      <Typography variant='body2' color='text.secondary'>
+                        {skipped.drivePending!.length} waiting on Drive conversion — retry once it finishes
+                      </Typography>
+                    )}
+                    {(skipped.notFound?.length ?? 0) > 0 && (
+                      <Typography variant='body2' color='text.secondary'>
+                        {skipped.notFound!.length} not found or deleted
+                      </Typography>
+                    )}
+                    {skipped.perCompanyErrors?.map(err => (
+                      <Typography key={err.companyId} variant='body2' color='error.main'>
+                        {err.companyName || err.companyId}: {err.reason} ({err.cmsIds.length} claim
+                        {err.cmsIds.length === 1 ? '' : 's'})
+                      </Typography>
+                    ))}
+                    {!skipped.alreadyProcessing?.length &&
+                      !skipped.drivePending?.length &&
+                      !skipped.notFound?.length &&
+                      !skipped.perCompanyErrors?.length && (
+                        <Typography variant='body2' color='text.secondary'>
+                          Nothing skipped.
+                        </Typography>
+                      )}
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            <div className='flex flex-col gap-3'>
+              <Typography variant='body2'>
+                Run the auto-claim script for <strong>{processableSelectedIds.length.toLocaleString('en-IN')}</strong>{' '}
+                selected {platformLabel} claim{processableSelectedIds.length === 1 ? '' : 's'} across{' '}
+                <strong>{selectedCompanies.length}</strong> compan
+                {selectedCompanies.length === 1 ? 'y' : 'ies'}. One job is dispatched per company.
+              </Typography>
+              {blockedSelectedCount > 0 && (
+                <Typography variant='body2' color='text.secondary'>
+                  {blockedSelectedCount} further selected claim{blockedSelectedCount === 1 ? ' is' : 's are'} queued,
+                  running or already successful and will not be sent — use <strong>Change Status</strong> to reset
+                  {blockedSelectedCount === 1 ? ' it' : ' them'} first.
+                </Typography>
+              )}
+              <div className='flex flex-wrap gap-1'>
+                {selectedCompanyNames.slice(0, 8).map(name => (
+                  <Chip key={name} size='small' variant='tonal' color='primary' label={name} />
+                ))}
+                {selectedCompanyNames.length > 8 && (
+                  <Chip size='small' variant='tonal' label={`+${selectedCompanyNames.length - 8} more`} />
+                )}
+              </div>
+              {processableSelectedIds.length > MAX_PROCESS_IDS && (
+                <Alert severity='warning'>
+                  The server accepts at most {MAX_PROCESS_IDS.toLocaleString('en-IN')} claims per run. Reduce the
+                  selection before submitting.
+                </Alert>
+              )}
+            </div>
+          )}
+        </DialogContent>
+        <DialogActions>
+          {runResult ? (
+            <Button variant='contained' onClick={closeProcessDialog}>
+              Close
+            </Button>
+          ) : (
+            <>
+              <Button color='secondary' onClick={closeProcessDialog} disabled={processing}>
+                Cancel
+              </Button>
+              <Button
+                variant='contained'
+                onClick={runProcessClaims}
+                disabled={
+                  processing || processableSelectedIds.length === 0 || processableSelectedIds.length > MAX_PROCESS_IDS
+                }
+              >
+                {processing ? <CircularProgress size={20} color='inherit' /> : 'Process'}
+              </Button>
+            </>
+          )}
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={statusDialogOpen} onClose={closeStatusDialog} maxWidth='sm' fullWidth>
+        <DialogTitle>Change Script Status</DialogTitle>
+        <DialogContent>
+          {statusResult ? (
+            <div className='flex flex-col gap-3'>
+              <Alert severity={statusResult.isSuccess ? ((statusResult.data?.modified ?? 0) > 0 ? 'success' : 'info') : 'error'}>
+                <AlertTitle>{statusResult.displayMessage || statusResult.message || 'Status change submitted'}</AlertTitle>
+                {statusResult.isSuccess
+                  ? `${(statusResult.data?.matched ?? 0).toLocaleString('en-IN')} claim(s) matched, ${(
+                      statusResult.data?.modified ?? 0
+                    ).toLocaleString('en-IN')} updated.`
+                  : 'Nothing was changed.'}
+              </Alert>
+              {statusResult.isSuccess && (
+                <Typography variant='body2' color='text.secondary'>
+                  {statusResult.data?.currentStatus === null ? 'No status' : statusResult.data?.currentStatus} →{' '}
+                  {statusResult.data?.newStatus} on {statusResult.data?.eCommercePlatform} for{' '}
+                  {statusResult.data?.companyIds?.length ?? 0} compan
+                  {(statusResult.data?.companyIds?.length ?? 0) === 1 ? 'y' : 'ies'}
+                </Typography>
+              )}
+              {(statusResult.data?.invalidIds?.length ?? 0) > 0 && (
+                <Typography variant='body2' color='error.main'>
+                  {statusResult.data!.invalidIds!.length} company id(s) were rejected as invalid.
+                </Typography>
+              )}
+            </div>
+          ) : (
+            <div className='flex flex-col gap-4'>
+              <Typography variant='body2'>
+                Flip <code>scriptProcessingStatus</code> on the <strong>{platformLabel}</strong> claims of{' '}
+                <strong>{selectedCompanies.length}</strong> selected compan
+                {selectedCompanies.length === 1 ? 'y' : 'ies'}.
+              </Typography>
+              <div className='flex gap-4 flex-wrap'>
+                <CustomTextField
+                  select
+                  label='Current status'
+                  value={statusFrom}
+                  onChange={e => setStatusFrom(e.target.value)}
+                  className='min-is-[200px] flex-1'
+                >
+                  {SCRIPT_STATUSES.map(status => (
+                    <MenuItem key={status} value={status}>
+                      {status}
+                    </MenuItem>
+                  ))}
+                  <MenuItem value={NO_STATUS}>No status (empty)</MenuItem>
+                </CustomTextField>
+                <CustomTextField
+                  select
+                  label='New status'
+                  value={statusTo}
+                  onChange={e => setStatusTo(e.target.value)}
+                  className='min-is-[200px] flex-1'
+                >
+                  {SCRIPT_STATUSES.map(status => (
+                    <MenuItem key={status} value={status}>
+                      {status}
+                    </MenuItem>
+                  ))}
+                </CustomTextField>
+              </div>
+              {statusTo === 'Not Started' && (
+                <Typography variant='body2' color='text.secondary'>
+                  Setting <strong>Not Started</strong> also clears <code>scriptProcessingError</code>.
+                </Typography>
+              )}
+              {statusFrom === statusTo && (
+                <Alert severity='info'>Current and new status are the same — this run would change nothing.</Alert>
+              )}
+              {/* The endpoint is company-scoped, not claim-scoped: the ticked
+                  rows only decide WHICH COMPANIES are touched. Saying so up
+                  front prevents a reset that is far wider than intended. */}
+              <Alert severity='warning'>
+                This applies to <strong>every</strong> {platformLabel} claim in those companies whose status is{' '}
+                {statusFrom === NO_STATUS ? 'empty' : `"${statusFrom}"`} — not only the claims you ticked.
+              </Alert>
+              <div className='flex flex-wrap gap-1'>
+                {selectedCompanyNames.slice(0, 8).map(name => (
+                  <Chip key={name} size='small' variant='tonal' color='primary' label={name} />
+                ))}
+                {selectedCompanyNames.length > 8 && (
+                  <Chip size='small' variant='tonal' label={`+${selectedCompanyNames.length - 8} more`} />
+                )}
+              </div>
+            </div>
+          )}
+        </DialogContent>
+        <DialogActions>
+          {statusResult ? (
+            <Button variant='contained' onClick={closeStatusDialog}>
+              Close
+            </Button>
+          ) : (
+            <>
+              <Button color='secondary' onClick={closeStatusDialog} disabled={statusSubmitting}>
+                Cancel
+              </Button>
+              <Button
+                variant='contained'
+                onClick={runChangeStatus}
+                disabled={statusSubmitting || selectedCompanies.length === 0 || statusFrom === statusTo}
+              >
+                {statusSubmitting ? <CircularProgress size={20} color='inherit' /> : 'Update Status'}
+              </Button>
+            </>
+          )}
+        </DialogActions>
+      </Dialog>
+
+      <Snackbar
+        open={Boolean(toast)}
+        autoHideDuration={6000}
+        onClose={() => setToast(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+      >
+        {toast ? (
+          <Alert severity={toast.severity} onClose={() => setToast(null)} sx={{ width: '100%' }}>
+            {toast.message}
+          </Alert>
+        ) : undefined}
+      </Snackbar>
     </Card>
   )
 }
