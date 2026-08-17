@@ -29,6 +29,9 @@ import classnames from 'classnames'
 import { createColumnHelper, flexRender, getCoreRowModel, useReactTable } from '@tanstack/react-table'
 import type { ColumnDef } from '@tanstack/react-table'
 
+// Hook Imports
+import useElementWidth from '@/hooks/useElementWidth'
+
 // Component Imports
 import CustomTextField from '@core/components/mui/TextField'
 
@@ -401,30 +404,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
 
   // Measured width of the table's horizontal scroller, handed to the expanded
   // panel so it scrolls on its own instead of widening the company table.
-  const scrollerRef = useRef<HTMLDivElement | null>(null)
-  const [scrollerWidth, setScrollerWidth] = useState(0)
-
-  useEffect(() => {
-    const el = scrollerRef.current
-
-    if (!el || typeof ResizeObserver === 'undefined') return
-
-    const update = () => {
-      const next = el.clientWidth
-
-      // Threshold guard: the panel is a child of the element being measured, so
-      // a 1px jitter (scrollbar appearing/disappearing) must not loop forever.
-      setScrollerWidth(prev => (Math.abs(prev - next) > 2 ? next : prev))
-    }
-
-    update()
-
-    const ro = new ResizeObserver(update)
-
-    ro.observe(el)
-
-    return () => ro.disconnect()
-  }, [])
+  const [scrollerRef, scrollerWidth] = useElementWidth<HTMLDivElement>()
 
   const toggleExpanded = useCallback((companyId: string) => {
     setExpanded(prev => ({ ...prev, [companyId]: !prev[companyId] }))
