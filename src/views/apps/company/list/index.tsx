@@ -849,7 +849,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
                   disabled={!row.original.userId}
                   onClick={() => openImpersonate(row.original.userId)}
                 >
-                  <i className='tabler-eye text-textSecondary' />
+                  <i className='tabler-external-link text-textSecondary' />
                 </IconButton>
               </span>
             </Tooltip>
