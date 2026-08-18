@@ -14,7 +14,8 @@
 8. **Theme + i18n over hardcoding.** Use theme tokens for colors/spacing; do not hardcode translatable strings.
 9. **Path aliases.** Import via `@core/*`, `@layouts/*`, `@menu/*`, `@/*` (see `tsconfig.json`). Avoid deep relative paths.
 10. **Dev server runs on port `4001`** (`pnpm dev`). Verify UI changes in the browser before declaring done.
-11. **English-only.** Do not maintain `src/data/dictionaries/en.json` (or any locale file). Do not import from `src/data/dictionaries/*` in new code. Hardcode English UI strings. `[lang]` stays in routes but is effectively fixed to `en`.
+11. **Cross-repo work follows the other repo's rules.** When a task needs changes in another TrackVid repo (`TrackVid-BE`, `TrackVid-FE`, `TrackVid-App`), read that repo's own `CLAUDE.md` first and let it govern the code added there — its checklist (auth tier per route, index/sargability of new queries, batch-size caps, migration and deploy order) wins over anything in this file. Report the change sets per repo and state the deploy order: BE ships before Monitor whenever the API contract changes.
+12. **English-only.** Do not maintain `src/data/dictionaries/en.json` (or any locale file). Do not import from `src/data/dictionaries/*` in new code. Hardcode English UI strings. `[lang]` stays in routes but is effectively fixed to `en`.
 
 ## Definition of done (Claude checklist)
 
@@ -26,5 +27,6 @@ Before reporting a task complete:
 - [ ] No new dependency added without justification.
 - [ ] `pnpm lint` passes (or explain the failure).
 - [ ] For UI changes, feature verified at `http://localhost:4001`.
+- [ ] Any change made in another repo followed that repo's `CLAUDE.md`, and the deploy order is stated.
 
 If any rule here blocks legitimate work, **flag it to the user and propose an edit to `DEVELOPMENT_RULES.md`** — do not silently break the rule.

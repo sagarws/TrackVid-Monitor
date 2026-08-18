@@ -33,6 +33,8 @@ import type { ColumnDef } from '@tanstack/react-table'
 import useElementWidth from '@/hooks/useElementWidth'
 
 // Component Imports
+import AccountCountFilter, { useAccountFilter } from '@/components/AccountCountFilter'
+import CopyableId from '@/components/CopyableId'
 import CustomTextField from '@core/components/mui/TextField'
 
 // Style Imports
@@ -56,6 +58,29 @@ export type PendingClaim = {
   processCount: number
 }
 
+// Metadata for a Myntra cookie jar harvested by the Chrome extension or the
+// automation. The jar's VALUES are deliberately not part of this shape — the BE
+// projects names only, because the cookies are live Myntra auth tokens.
+export type MyntraSession = {
+  savedAt: string | null
+  expiresAt: string | null
+  ip: string | null
+  source: string | null
+  hasProxySession: boolean
+  cookieNames: string[]
+}
+
+// One configured login on the platform being reported on.
+export type PlatformCredential = {
+  credentialId: string
+  username: string
+  accountType: string
+  vendorCode: string
+  isVerified: boolean
+  visible: boolean
+  myntraSession: MyntraSession | null
+}
+
 export type PendingCompanyRow = {
   companyId: string
   companyName: string
@@ -64,6 +89,7 @@ export type PendingCompanyRow = {
   userId: string
   pendingCount: number
   platformCredCount: number
+  credentials: PlatformCredential[]
   claims: PendingClaim[]
 }
 
@@ -201,6 +227,28 @@ const mapCompanyToRow = (c: any): PendingCompanyRow => ({
   userId: c?.userId ? String(c.userId) : '',
   pendingCount: Number(c?.pendingCount ?? 0),
   platformCredCount: Number(c?.platformCredCount ?? 0),
+  credentials: (Array.isArray(c?.platformCredentials) ? c.platformCredentials : []).map(
+    (cred: any): PlatformCredential => ({
+      credentialId: String(cred?._id ?? ''),
+      username: String(cred?.username ?? ''),
+      accountType: String(cred?.accountType ?? ''),
+      vendorCode: String(cred?.vendorCode ?? ''),
+      // Absent on legacy credentials saved before the field existed; those
+      // count as verified, matching the automation's own rule.
+      isVerified: cred?.is_verified !== false,
+      visible: cred?.visible !== false,
+      myntraSession: cred?.myntraSession
+        ? {
+            savedAt: cred.myntraSession.savedAt ?? null,
+            expiresAt: cred.myntraSession.expiresAt ?? null,
+            ip: cred.myntraSession.ip ?? null,
+            source: cred.myntraSession.source ?? null,
+            hasProxySession: Boolean(cred.myntraSession.hasProxySession),
+            cookieNames: Array.isArray(cred.myntraSession.cookieNames) ? cred.myntraSession.cookieNames : []
+          }
+        : null
+    })
+  ),
   claims: (Array.isArray(c?.pendingClaims) ? c.pendingClaims : []).map((claim: any): PendingClaim => ({
     claimId: String(claim?.claimId ?? ''),
     typeOfReason: String(claim?.typeOfReason ?? ''),
@@ -231,6 +279,150 @@ const summarizeStatuses = (claims: PendingClaim[]) => {
   return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])
 }
 
+// A jar is only useful until it expires; the automation refuses an expired one,
+// so "Expired" here explains a company whose claims never leave Not Started.
+const sessionState = (session: MyntraSession | null): { label: string; color: 'success' | 'error' | 'default' } => {
+  if (!session) return { label: 'No session', color: 'default' }
+
+  const expiry = session.expiresAt ? new Date(session.expiresAt).getTime() : NaN
+
+  if (Number.isNaN(expiry)) return { label: 'Unknown expiry', color: 'default' }
+
+  return expiry > Date.now() ? { label: 'Active', color: 'success' } : { label: 'Expired', color: 'error' }
+}
+
+// ISO instants from the session record, shown in the viewer's own timezone —
+// unlike claim `createdAt`, these really are instants.
+const formatInstant = (iso: string | null) => {
+  if (!iso) return '—'
+  const d = new Date(iso)
+
+  return Number.isNaN(d.getTime()) ? String(iso) : d.toLocaleString('en-IN', { hour12: true })
+}
+
+// "in 42m" / "2h ago" — the number ops actually reads off an expiry.
+const relativeToNow = (iso: string | null) => {
+  if (!iso) return ''
+  const ms = new Date(iso).getTime()
+
+  if (Number.isNaN(ms)) return ''
+
+  const diff = ms - Date.now()
+  const mins = Math.round(Math.abs(diff) / 60000)
+  const text = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`
+
+  return diff >= 0 ? `in ${text}` : `${text} ago`
+}
+
+// The company's configured logins on the selected platform. Sits above the
+// claims table because "is this account even usable?" is the first question
+// asked of a company whose claims are all stuck.
+const CredentialsPanel = ({
+  credentials,
+  platform,
+  onViewSession
+}: {
+  credentials: PlatformCredential[]
+  platform: PlatformKey
+  onViewSession: (credential: PlatformCredential) => void
+}) => {
+  const isMyntra = platform === 'myntra'
+
+  return (
+    <div className='overflow-auto rounded border mbe-4'>
+      <table className={tableStyles.table}>
+        <thead>
+          <tr>
+            <th className='is-[280px]'>Account</th>
+            <th className='is-[140px]'>Type</th>
+            <th className='is-[160px]'>Vendor code</th>
+            <th className='is-[140px]'>Verified</th>
+            {isMyntra && <th className='is-[180px]'>Myntra session</th>}
+            {isMyntra && <th className='is-[90px] text-center'>View</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {credentials.length === 0 ? (
+            <tr>
+              <td colSpan={isMyntra ? 6 : 4}>
+                <Typography variant='body2' color='text.disabled'>
+                  No accounts configured on this platform — the claims below cannot be dispatched
+                </Typography>
+              </td>
+            </tr>
+          ) : (
+            credentials.map((cred, i) => {
+              const state = sessionState(cred.myntraSession)
+
+              return (
+                <tr key={cred.credentialId || `${cred.username}-${i}`}>
+                  <td>
+                    <Typography variant='body2' color='text.primary' className='font-medium break-all'>
+                      {cred.username || '—'}
+                    </Typography>
+                    {!cred.visible && (
+                      <Typography variant='caption' color='text.disabled'>
+                        Hidden from the seller UI
+                      </Typography>
+                    )}
+                  </td>
+                  <td>
+                    <Typography variant='body2'>{cred.accountType || '—'}</Typography>
+                  </td>
+                  <td>
+                    <Typography variant='body2' className='break-all'>
+                      {cred.vendorCode || '—'}
+                    </Typography>
+                  </td>
+                  <td>
+                    {cred.isVerified ? (
+                      <Chip size='small' variant='tonal' color='success' label='Verified' />
+                    ) : (
+                      <Tooltip title='The automation skips an unverified credential until it is re-verified'>
+                        <Chip size='small' variant='tonal' color='warning' label='Unverified' />
+                      </Tooltip>
+                    )}
+                  </td>
+                  {isMyntra && (
+                    <td>
+                      <Tooltip
+                        title={
+                          cred.myntraSession?.expiresAt
+                            ? `Expires ${formatInstant(cred.myntraSession.expiresAt)} (${relativeToNow(
+                                cred.myntraSession.expiresAt
+                              )})`
+                            : 'No cookie jar stored for this account'
+                        }
+                      >
+                        <Chip size='small' variant='tonal' color={state.color} label={state.label} />
+                      </Tooltip>
+                    </td>
+                  )}
+                  {isMyntra && (
+                    <td className='text-center'>
+                      <Tooltip title={cred.myntraSession ? 'View session details' : 'No session to view'}>
+                        <span>
+                          <IconButton
+                            size='small'
+                            disabled={!cred.myntraSession}
+                            onClick={() => onViewSession(cred)}
+                          >
+                            <i className='tabler-eye text-base' />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                    </td>
+                  )}
+                </tr>
+              )
+            })
+          )}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 // Expanded row content: every pending claim of the company on the selected
 // platform, with the script's own status and error text. The error is the
 // column ops actually acts on, so it gets the widest cell and a tooltip with
@@ -244,20 +436,33 @@ const summarizeStatuses = (claims: PendingClaim[]) => {
 // panel owns its own horizontal scrollbar and the company table keeps fitting.
 const PendingClaimsPanel = ({
   claims,
+  credentials,
+  platform,
   companyId,
   companyName,
   width,
   selected,
-  onToggleClaim
+  onToggleClaim,
+  onViewSession
 }: {
   claims: PendingClaim[]
+  credentials: PlatformCredential[]
+  platform: PlatformKey
   companyId: string
   companyName: string
   width: number
   selected: Record<string, SelectedClaim>
   onToggleClaim: (claim: PendingClaim, companyId: string, companyName: string) => void
+  onViewSession: (credential: PlatformCredential) => void
 }) => (
   <div className='bg-actionHover plb-4 pli-6 border-bs'>
+    <div
+      // Both tables share the measured width so they scroll as one column of
+      // content rather than drifting to different right edges.
+      style={width ? { inlineSize: Math.max(240, width - 48) } : undefined}
+    >
+      <CredentialsPanel credentials={credentials} platform={platform} onViewSession={onViewSession} />
+    </div>
     <div
       className='overflow-auto rounded border max-bs-[520px]'
       // pli-6 on the wrapper = 24px of padding either side.
@@ -380,6 +585,10 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   const [pageSize, setPageSize] = useState(10)
   const [platform, setPlatform] = useState<PlatformKey>('myntra')
   const [sort, setSort] = useState<SortKey>('desc')
+  // Defaults to "Non Zero Account": a company with no credential configured on
+  // the platform cannot have its claims dispatched at all, so those rows are
+  // noise on first load and are opted into rather than out of.
+  const account = useAccountFilter({ initial: ['nonZero'], onChange: () => setPage(0) })
   const [search, setSearch] = useState('')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [loading, setLoading] = useState(true)
@@ -391,6 +600,8 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   const [processing, setProcessing] = useState(false)
   const [runResult, setRunResult] = useState<RunResponse | null>(null)
   const [toast, setToast] = useState<Toast | null>(null)
+  // Credential whose Myntra session is open in the modal; null = closed.
+  const [sessionCredential, setSessionCredential] = useState<PlatformCredential | null>(null)
 
   // ── Bulk script-status change ───────────────────────────────────────────
   // Defaults match the BE's own defaults and the flow this exists for:
@@ -438,7 +649,8 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
           limit: pageSize,
           search: debouncedSearch,
           eCommercePlatform: platform,
-          sort
+          sort,
+          ...(account.payload ? { accountFilter: account.payload } : {})
         })
       })
 
@@ -469,7 +681,8 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
     } finally {
       if (reqId === reqIdRef.current) setLoading(false)
     }
-  }, [page, pageSize, debouncedSearch, platform, sort])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, pageSize, debouncedSearch, platform, sort, account.payloadKey])
 
   useEffect(() => {
     fetchRows()
@@ -778,6 +991,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
             <Typography variant='caption' color='text.secondary'>
               {row.original.platformCredCount} account{row.original.platformCredCount === 1 ? '' : 's'} configured
             </Typography>
+            <CopyableId id={row.original.companyId} label='company id' />
           </div>
         )
       }),
@@ -961,6 +1175,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
               </MenuItem>
             ))}
           </CustomTextField>
+          <AccountCountFilter {...account} />
         </div>
         <div className='flex items-center gap-3 flex-wrap max-sm:is-full'>
           {/* Company count plus the claim total on this page: a small number of
@@ -969,12 +1184,17 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
             {loading ? (
               <CircularProgress size={14} />
             ) : (
-              <Typography variant='body2' color='text.primary' className='font-medium tabular-nums'>
+              <Typography
+                variant='body2'
+                color={account.payload ? 'primary.main' : 'text.primary'}
+                className='font-medium tabular-nums'
+              >
                 {total.toLocaleString('en-IN')}
               </Typography>
             )}
             <Typography variant='body2' color='text.secondary'>
               {total === 1 ? 'company' : 'companies'}
+              {account.payload ? ' found' : ''}
               {!loading && pageClaimTotal > 0 ? ` • ${pageClaimTotal.toLocaleString('en-IN')} claims on this page` : ''}
             </Typography>
           </div>
@@ -1089,11 +1309,14 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
                       <td colSpan={row.getVisibleCells().length} className='p-0 border-bs-0'>
                         <PendingClaimsPanel
                           claims={row.original.claims}
+                          credentials={row.original.credentials}
+                          platform={platform}
                           companyId={row.original.companyId}
                           companyName={row.original.companyName}
                           width={scrollerWidth}
                           selected={selected}
                           onToggleClaim={toggleClaim}
+                          onViewSession={setSessionCredential}
                         />
                       </td>
                     </tr>
@@ -1362,6 +1585,62 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
               </Button>
             </>
           )}
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={Boolean(sessionCredential)} onClose={() => setSessionCredential(null)} maxWidth='sm' fullWidth>
+        <DialogTitle>Myntra session</DialogTitle>
+        <DialogContent>
+          {sessionCredential?.myntraSession ? (
+            <div className='flex flex-col gap-3'>
+              <div className='flex items-center gap-2 flex-wrap'>
+                <Typography color='text.primary' className='font-medium break-all'>
+                  {sessionCredential.username}
+                </Typography>
+                <Chip
+                  size='small'
+                  variant='tonal'
+                  color={sessionState(sessionCredential.myntraSession).color}
+                  label={sessionState(sessionCredential.myntraSession).label}
+                />
+                {sessionCredential.myntraSession.expiresAt && (
+                  <Typography variant='caption' color='text.secondary'>
+                    expires {relativeToNow(sessionCredential.myntraSession.expiresAt)}
+                  </Typography>
+                )}
+              </div>
+              {/* The record as stored, minus the cookie VALUES: `jar` holds a
+                  live erp.at JWT and session cookie, so the API sends names
+                  only and `jar` is rendered as `cookieNames`. */}
+              <pre className='bg-actionHover rounded border plb-3 pli-4 overflow-auto max-bs-[420px] text-xs font-mono whitespace-pre'>
+                {JSON.stringify(sessionCredential.myntraSession, null, 2)}
+              </pre>
+              <Typography variant='caption' color='text.secondary'>
+                Cookie values are never sent to this dashboard — `jar` is reported as `cookieNames`. `erp.at` and
+                `session` are the two the automation requires.
+              </Typography>
+            </div>
+          ) : null}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            color='secondary'
+            startIcon={<i className='tabler-copy' />}
+            onClick={() => {
+              if (!sessionCredential?.myntraSession) return
+              navigator.clipboard
+                ?.writeText(JSON.stringify(sessionCredential.myntraSession, null, 2))
+                .then(() => setToast({ severity: 'success', message: 'Session JSON copied' }))
+                // Clipboard access is denied outside a secure context; say so
+                // rather than leaving the button looking broken.
+                .catch(() => setToast({ severity: 'error', message: 'Could not copy — clipboard blocked' }))
+            }}
+          >
+            Copy JSON
+          </Button>
+          <Button variant='contained' onClick={() => setSessionCredential(null)}>
+            Close
+          </Button>
         </DialogActions>
       </Dialog>
 

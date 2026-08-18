@@ -39,6 +39,9 @@ import {
 import type { ColumnDef } from '@tanstack/react-table'
 
 // Component Imports
+import AccountCountFilter, { useAccountFilter } from '@/components/AccountCountFilter'
+import CopyableId from '@/components/CopyableId'
+import FilterCheck from '@/components/FilterCheck'
 import CustomTextField from '@core/components/mui/TextField'
 
 // Style Imports
@@ -209,47 +212,32 @@ type ListResponse = {
   }
 }
 
+// A stuck RUNNING ScriptJob row, as /script-jobs/clear-running reports it.
+type RunningJob = {
+  _id: string
+  jobId: string
+  jobType: string
+  companyId: string
+  startedAt: string | null
+  lastHeartbeat: string | null
+  heartbeatAgeMinutes: number | null
+  totalAwbs: number
+  processedAwbs: number
+  cmsIdCount: number
+}
+
+type ClearJobsResponse = {
+  isSuccess: boolean
+  displayMessage?: string
+  message?: string
+  data?: { jobs?: RunningJob[]; matched?: number; deleted?: number; dryRun?: boolean } | null
+}
+
 type Toast = { severity: 'success' | 'error' | 'warning'; message: string }
 
 type Props = {
   impersonateBaseUrl: string
 }
-
-// A checkbox row that visibly changes state when ticked. Plain MUI checkboxes
-// on a dark surface read as near-identical whether on or off at a glance; the
-// tinted, bordered row is what makes an active filter obvious without having to
-// look at the box itself.
-const FilterCheck = ({
-  label,
-  checked,
-  onChange,
-  dense
-}: {
-  label: string
-  checked: boolean
-  onChange: (v: boolean) => void
-  dense?: boolean
-}) => (
-  <FormControlLabel
-    label={label}
-    className={classnames('is-full mli-0 rounded border transition-colors', {
-      'bg-primaryLight border-primary': checked,
-      'border-transparent hover:bg-actionHover': !checked,
-      'plb-0.5': dense,
-      'plb-1': !dense
-    })}
-    control={
-      <Checkbox size='small' checked={checked} onChange={e => onChange(e.target.checked)} />
-    }
-    slotProps={{
-      typography: {
-        variant: 'body2',
-        color: checked ? 'text.primary' : 'text.secondary',
-        className: checked ? 'font-medium' : ''
-      }
-    }}
-  />
-)
 
 // Expanded row content: every marketplace credential for the company with its
 // own last-sync timestamp. Grouped by platform; platforms with no credentials
@@ -419,6 +407,25 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   const [filterUsingMdNo, setFilterUsingMdNo] = useState(false)
   const [filterAnchor, setFilterAnchor] = useState<null | HTMLElement>(null)
 
+  // Account count (credentials configured across the ticked platforms, or all
+  // platforms when none is ticked). Defaults to "All": this is the master list
+  // of every company, so silently hiding the ones with nothing set up would be
+  // a surprise — unlike Pending CMS, where they cannot be actioned at all.
+  const account = useAccountFilter({ onChange: () => setPage(0) })
+
+  // ── Stuck-job cleanup ───────────────────────────────────────────────────
+  // Opens on a dry run: the list of rows that WOULD be deleted is shown before
+  // anything is, because a job that is genuinely mid-run looks identical from
+  // the Company list until you see its heartbeat age.
+  const [jobsDialogOpen, setJobsDialogOpen] = useState(false)
+  const [jobsLoading, setJobsLoading] = useState(false)
+  const [jobsDeleting, setJobsDeleting] = useState(false)
+  const [runningJobs, setRunningJobs] = useState<RunningJob[] | null>(null)
+  const [jobsDeleted, setJobsDeleted] = useState<number | null>(null)
+  // Heartbeat cutoff. Defaults to 5 minutes — a live runner beats continuously,
+  // so anything quieter than that is dead; 0 means "every RUNNING row".
+  const [jobsStaleMinutes, setJobsStaleMinutes] = useState(5)
+
   const selectedPlatforms = useMemo(
     () => (Object.keys(filterPlatforms) as PlatformKey[]).filter(k => filterPlatforms[k]),
     [filterPlatforms]
@@ -448,7 +455,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     (filterNoCredentials ? 1 : 0) +
     (credentialVerified ? 1 : 0) +
     (masterDataSynced ? 1 : 0) +
-    (isUsingMasterData ? 1 : 0)
+    (isUsingMasterData ? 1 : 0) +
+    (account.payload ? 1 : 0)
 
   const clearFilters = useCallback(() => {
     setFilterPlatforms({ ajio: false, myntra: false, snapdeal: false, meesho: false })
@@ -459,7 +467,9 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     setFilterSyncedNo(false)
     setFilterUsingMdYes(false)
     setFilterUsingMdNo(false)
+    account.setFilters(['all'])
     setPage(0)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   // Which company rows have their per-credential sync panel open.
@@ -502,7 +512,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
           ...(filterNoCredentials ? { noPlatformCredentials: true } : {}),
           ...(credentialVerified ? { credentialVerified } : {}),
           ...(masterDataSynced ? { masterDataSynced } : {}),
-          ...(isUsingMasterData ? { isUsingMasterData } : {})
+          ...(isUsingMasterData ? { isUsingMasterData } : {}),
+          ...(account.payload ? { accountFilter: account.payload } : {})
         })
       })
 
@@ -541,7 +552,9 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     filterNoCredentials,
     credentialVerified,
     masterDataSynced,
-    isUsingMasterData
+    isUsingMasterData,
+    account.payloadKey
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   ])
 
   useEffect(() => {
@@ -701,6 +714,90 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     [callTrigger, fetchRows]
   )
 
+  // One call serves both steps; `dryRun` decides whether it deletes.
+  const callClearJobs = useCallback(
+    async (dryRun: boolean) => {
+      const res = await fetch('/api/company/clear-running-jobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          companyIds: selectedCompanyIds,
+          olderThanMinutes: jobsStaleMinutes,
+          dryRun
+        })
+      })
+
+      const json = (await res.json().catch(() => null)) as ClearJobsResponse | null
+
+      return { res, json }
+    },
+    [selectedCompanyIds, jobsStaleMinutes]
+  )
+
+  const loadRunningJobs = useCallback(async () => {
+    setJobsLoading(true)
+    setJobsDeleted(null)
+
+    try {
+      const { res, json } = await callClearJobs(true)
+
+      if (!res.ok || !json?.isSuccess) {
+        setRunningJobs([])
+        setToast({ severity: 'error', message: json?.displayMessage || json?.message || `Request failed (${res.status})` })
+
+        return
+      }
+
+      setRunningJobs(json.data?.jobs ?? [])
+    } catch (err: any) {
+      setRunningJobs([])
+      setToast({ severity: 'error', message: err?.message || 'Failed to load running jobs' })
+    } finally {
+      setJobsLoading(false)
+    }
+  }, [callClearJobs])
+
+  // Re-run the preview whenever the dialog opens or the cutoff moves, so the
+  // list on screen is always the list the Delete button will act on.
+  useEffect(() => {
+    if (!jobsDialogOpen) return
+    loadRunningJobs()
+  }, [jobsDialogOpen, loadRunningJobs])
+
+  const confirmClearJobs = async () => {
+    setJobsDeleting(true)
+
+    try {
+      const { res, json } = await callClearJobs(false)
+
+      if (!res.ok || !json?.isSuccess) {
+        setToast({ severity: 'error', message: json?.displayMessage || json?.message || `Request failed (${res.status})` })
+
+        return
+      }
+
+      const deleted = json.data?.deleted ?? 0
+
+      setJobsDeleted(deleted)
+      setRunningJobs(json.data?.jobs ?? [])
+      setToast({
+        severity: deleted > 0 ? 'success' : 'warning',
+        message: deleted > 0 ? `Deleted ${deleted} running job(s)` : 'No running jobs matched'
+      })
+    } catch (err: any) {
+      setToast({ severity: 'error', message: err?.message || 'Failed to clear running jobs' })
+    } finally {
+      setJobsDeleting(false)
+    }
+  }
+
+  const closeJobsDialog = () => {
+    if (jobsDeleting) return
+    setJobsDialogOpen(false)
+    setRunningJobs(null)
+    setJobsDeleted(null)
+  }
+
   const submitBulkSync = async () => {
     const platforms = (Object.keys(dialogPlatforms) as PlatformKey[]).filter(k => dialogPlatforms[k])
 
@@ -778,9 +875,12 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
       columnHelper.accessor('companyName', {
         header: 'Company',
         cell: ({ row }) => (
-          <Typography color='text.primary' className='font-medium'>
-            {row.original.companyName}
-          </Typography>
+          <div className='flex flex-col'>
+            <Typography color='text.primary' className='font-medium'>
+              {row.original.companyName}
+            </Typography>
+            <CopyableId id={row.original.companyId} label='company id' />
+          </div>
         )
       }),
       columnHelper.accessor('adminName', {
@@ -883,21 +983,36 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
         </div>
       )}
       <div className='flex justify-between flex-col items-start md:flex-row md:items-center p-6 border-bs gap-4'>
-        <CustomTextField
-          select
-          value={pageSize}
-          onChange={e => {
-            setPageSize(Number(e.target.value))
-            setPage(0)
-          }}
-          className='max-sm:is-full sm:is-[90px]'
-        >
-          {PAGE_SIZE_OPTIONS.map(size => (
-            <MenuItem key={size} value={String(size)}>
-              {size}
-            </MenuItem>
-          ))}
-        </CustomTextField>
+        <div className='flex items-center gap-4 flex-wrap max-sm:is-full'>
+          <CustomTextField
+            select
+            value={pageSize}
+            onChange={e => {
+              setPageSize(Number(e.target.value))
+              setPage(0)
+            }}
+            className='max-sm:is-full sm:is-[90px]'
+          >
+            {PAGE_SIZE_OPTIONS.map(size => (
+              <MenuItem key={size} value={String(size)}>
+                {size}
+              </MenuItem>
+            ))}
+          </CustomTextField>
+          <Tooltip title='Delete stuck RUNNING script jobs for the selected companies'>
+            <span>
+              <Button
+                variant='outlined'
+                color='error'
+                startIcon={<i className='tabler-trash' />}
+                disabled={selectedCompanyIds.length === 0}
+                onClick={() => setJobsDialogOpen(true)}
+              >
+                Clear Running Jobs{selectedCompanyIds.length ? ` (${selectedCompanyIds.length})` : ''}
+              </Button>
+            </span>
+          </Tooltip>
+        </div>
         <div className='flex items-center gap-3 flex-wrap max-sm:is-full'>
           {/* Match count for the current search + filters. Sits next to the
               Filter button so the number and the thing that changed it are read
@@ -1046,6 +1161,10 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
                   Companies with no marketplace account set up. Combines with the platforms above as OR.
                 </Typography>
               </div>
+
+              <Divider />
+
+              <AccountCountFilter {...account} variant='checkbox' />
 
               <Divider />
 
@@ -1200,6 +1319,24 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
               }}
             />
           )}
+          {account.payload && (
+            <Chip
+              size='small'
+              variant='tonal'
+              color='primary'
+              label={`Accounts: ${[
+                account.payload.zero ? 'Zero' : '',
+                account.payload.nonZero ? 'Non zero' : '',
+                account.payload.numbers.length ? account.payload.numbers.join(', ') : ''
+              ]
+                .filter(Boolean)
+                .join(' / ')}`}
+              onDelete={() => {
+                account.setFilters(['all'])
+                setPage(0)
+              }}
+            />
+          )}
           {isUsingMasterData && (
             <Chip
               size='small'
@@ -1336,6 +1473,122 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
           </Button>
           <Button variant='contained' onClick={submitBulkSync} disabled={dialogSubmitting}>
             {dialogSubmitting ? <CircularProgress size={20} color='inherit' /> : 'Submit'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={jobsDialogOpen} onClose={closeJobsDialog} maxWidth='md' fullWidth>
+        <DialogTitle>Clear Running Jobs</DialogTitle>
+        <DialogContent>
+          <div className='flex flex-col gap-4'>
+            <Typography variant='body2'>
+              A RUNNING script job left behind by a dead runner makes every later Process Claim skip that company.
+              Deleting the row clears that guard. It does not stop a job that is genuinely still running.
+            </Typography>
+            <div className='flex items-end gap-4 flex-wrap'>
+              <CustomTextField
+                select
+                label='Only jobs with no heartbeat for'
+                value={jobsStaleMinutes}
+                onChange={e => setJobsStaleMinutes(Number(e.target.value))}
+                disabled={jobsDeleting}
+                className='is-[260px]'
+              >
+                <MenuItem value={0}>Any age (all RUNNING)</MenuItem>
+                <MenuItem value={2}>2 minutes</MenuItem>
+                <MenuItem value={5}>5 minutes</MenuItem>
+                <MenuItem value={15}>15 minutes</MenuItem>
+                <MenuItem value={60}>1 hour</MenuItem>
+              </CustomTextField>
+              {jobsLoading && <CircularProgress size={20} />}
+            </div>
+            {jobsDeleted !== null && (
+              <Alert severity={jobsDeleted > 0 ? 'success' : 'warning'}>
+                {jobsDeleted > 0
+                  ? `Deleted ${jobsDeleted} running job(s). Process Claim will no longer skip these companies.`
+                  : 'No running jobs matched — nothing was deleted.'}
+              </Alert>
+            )}
+            {/* The preview IS the safety mechanism: heartbeat age is the only
+                thing separating a dead row from a live run. */}
+            {!jobsLoading && runningJobs !== null && (
+              runningJobs.length === 0 ? (
+                <Alert severity='info'>
+                  No RUNNING jobs for the selected {selectedCompanyIds.length === 1 ? 'company' : 'companies'} at this
+                  cutoff.
+                </Alert>
+              ) : (
+                <div className='overflow-x-auto rounded border'>
+                  <table className={tableStyles.table}>
+                    <thead>
+                      <tr>
+                        <th className='is-[120px]'>Job</th>
+                        <th className='is-[120px]'>Type</th>
+                        <th className='is-[220px]'>Company</th>
+                        <th className='is-[180px]'>Last heartbeat</th>
+                        <th className='is-[120px]'>Progress</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {runningJobs.map(job => {
+                        const age = job.heartbeatAgeMinutes
+
+                        return (
+                          <tr key={job._id}>
+                            <td>
+                              <Typography variant='body2' color='text.primary' className='font-medium'>
+                                {job.jobId}
+                              </Typography>
+                            </td>
+                            <td>
+                              <Chip size='small' variant='tonal' label={job.jobType} />
+                            </td>
+                            <td>
+                              <Typography variant='body2' className='break-all'>
+                                {rows.find(r => r.companyId === job.companyId)?.companyName || job.companyId}
+                              </Typography>
+                            </td>
+                            <td>
+                              <Chip
+                                size='small'
+                                variant='tonal'
+                                // Under 2 minutes the runner is probably alive —
+                                // flagged rather than blocked, since only ops
+                                // knows whether the script was killed.
+                                color={age === null ? 'default' : age >= 5 ? 'error' : age >= 2 ? 'warning' : 'success'}
+                                label={age === null ? 'unknown' : age < 1 ? 'just now' : `${age}m ago`}
+                              />
+                            </td>
+                            <td>
+                              <Typography variant='body2' className='tabular-nums'>
+                                {job.processedAwbs}/{job.totalAwbs}
+                              </Typography>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            )}
+          </div>
+        </DialogContent>
+        <DialogActions>
+          <Button color='secondary' onClick={closeJobsDialog} disabled={jobsDeleting}>
+            {jobsDeleted !== null ? 'Close' : 'Cancel'}
+          </Button>
+          <Button
+            variant='contained'
+            color='error'
+            onClick={confirmClearJobs}
+            disabled={jobsDeleting || jobsLoading || !runningJobs?.length}
+          >
+            {jobsDeleting ? (
+              <CircularProgress size={20} color='inherit' />
+            ) : (
+              `Delete ${runningJobs?.length ?? 0} job(s)`
+            )}
           </Button>
         </DialogActions>
       </Dialog>
