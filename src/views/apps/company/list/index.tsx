@@ -67,7 +67,9 @@ export type CredentialSync = {
 }
 
 export type PlatformCredentials = {
-  key: PlatformKey
+  // Every platform TrackVid supports, not just the four with sync jobs: the
+  // expanded panel is where an operator opens or inspects any account.
+  key: FilterPlatformKey
   label: string
   accounts: CredentialSync[]
 }
@@ -103,6 +105,41 @@ const PLATFORM_LABELS: { key: PlatformKey; label: string }[] = [
 
 const TRACKED_PLATFORMS: PlatformKey[] = ['ajio', 'myntra', 'snapdeal', 'meesho']
 
+// Narrows a full-platform key to one the master-data sync jobs cover. The Last
+// Sync column and every sync button are only meaningful for these four —
+// /trigger-master-sync rejects the rest.
+const isSyncable = (key: FilterPlatformKey): key is PlatformKey => TRACKED_PLATFORMS.includes(key as PlatformKey)
+
+// ── Local browser agent ──────────────────────────────────────────────────
+// "Open account" hands the credential to a helper process running on the
+// operator's own machine (see agent/ in this repo), which launches Chrome,
+// logs in, and leaves the window open. A web page cannot launch a browser
+// itself, and the automation server's Chrome opens on the server — neither
+// gets a human into a seller portal.
+const AGENT_URL = process.env.NEXT_PUBLIC_LOCAL_AGENT_URL || 'http://127.0.0.1:7788'
+
+// Platforms the agent carries a login flow for. Kept in step with
+// agent/logins/index.js — a key missing here just disables the button.
+const AGENT_PLATFORMS = new Set<FilterPlatformKey>([
+  'myntra',
+  'ajio',
+  'snapdeal',
+  'meesho',
+  'flipkart',
+  'nykaa',
+  'delhivery',
+  'xbees'
+])
+
+const openAccountHint = (agentReady: boolean | null, platform: FilterPlatformKey, account: CredentialSync) => {
+  if (agentReady === null) return 'Checking for the local agent…'
+  if (!agentReady) return `Local agent not running — start it with "pnpm agent" (expected at ${AGENT_URL})`
+  if (!AGENT_PLATFORMS.has(platform)) return 'No login flow for this platform yet'
+  if (!account.password && platform !== 'myntra') return 'No password stored — cannot log in'
+
+  return `Open a logged-in browser as ${account.username}`
+}
+
 // The Platform filter matches credentials by eComPlatform, which can be any of
 // the platforms TrackVid supports — not just the four with master-data sync
 // jobs. Never mutated; every setter builds a fresh object.
@@ -135,7 +172,13 @@ const toIsoDate = (value: unknown): string => {
 const pickCredentials = (loginInfo: any): PlatformCredentials[] => {
   const platforms = Array.isArray(loginInfo) ? loginInfo : []
 
-  return PLATFORM_LABELS.map(({ key, label }) => {
+  // Only platforms the company actually holds a credential on, plus the four
+  // sync platforms which are always listed so "not configured" stays visible
+  // and distinguishable from "configured but never synced".
+  const configured = new Set(platforms.map((p: any) => String(p?.eComPlatform ?? '').toLowerCase()))
+  const shown = PLATFORMS.filter(p => configured.has(p.key) || TRACKED_PLATFORMS.includes(p.key as PlatformKey))
+
+  return shown.map(({ key, label }) => {
     const entry = platforms.find((p: any) => String(p?.eComPlatform ?? '').toLowerCase() === key)
 
     const accounts: CredentialSync[] = (Array.isArray(entry?.info) ? entry.info : []).map((acc: any) => ({
@@ -157,7 +200,8 @@ const rollUpLastSync = (credentials: PlatformCredentials[]): CompanyRow['lastSyn
   const out = { ajio: '', myntra: '', snapdeal: '', meesho: '' } as CompanyRow['lastSync']
 
   for (const { key, accounts } of credentials) {
-    if (!accounts.length) continue
+    // Non-syncable platforms have no rollup to report.
+    if (!isSyncable(key) || !accounts.length) continue
 
     // A never-synced account makes the whole platform "—": there is no date
     // that honestly describes "everything is synced since X".
@@ -264,12 +308,20 @@ const CredentialSyncPanel = ({
   credentials,
   companyId,
   inFlight,
-  onSyncCredential
+  agentReady,
+  opening,
+  onSyncCredential,
+  onOpenAccount
 }: {
   credentials: PlatformCredentials[]
   companyId: string
   inFlight: Set<string>
+  // null while the agent probe is still in flight, so the button can say
+  // "checking" instead of claiming the agent is down.
+  agentReady: boolean | null
+  opening: Set<string>
   onSyncCredential: (companyId: string, platform: PlatformKey, credentialId: string) => void
+  onOpenAccount: (platform: FilterPlatformKey, account: CredentialSync) => void
 }) => {
   // Which passwords are currently revealed, by credentialId. Masked by default
   // and never persisted: this panel is opened on shared screens, and a password
@@ -295,6 +347,7 @@ const CredentialSyncPanel = ({
             <th className='is-[120px]'>Status</th>
             <th className='is-[200px]'>Last sync</th>
             <th className='is-[80px] text-center'>Sync</th>
+            <th className='is-[150px] text-center'>Open account</th>
           </tr>
         </thead>
         <tbody>
@@ -307,7 +360,7 @@ const CredentialSyncPanel = ({
                       {label}
                     </Typography>
                   </td>
-                  <td colSpan={4}>
+                  <td colSpan={5}>
                     <Typography variant='body2' color='text.disabled'>
                       No accounts configured
                     </Typography>
@@ -320,6 +373,7 @@ const CredentialSyncPanel = ({
 
             return accounts.map((acc, i) => {
               const busy = inFlight.has(`${companyId}:${key}:${acc.credentialId}`)
+              const openingThis = opening.has(`${key}:${acc.username}`)
 
               return (
                 <tr key={acc.credentialId || `${key}-${acc.username}`}>
@@ -412,11 +466,43 @@ const CredentialSyncPanel = ({
                       <span>
                         <IconButton
                           size='small'
-                          disabled={busy || !acc.credentialId || !companyId}
-                          onClick={() => onSyncCredential(companyId, key, acc.credentialId)}
+                          // Non-syncable platforms have no master-data job to
+                          // trigger; the button would only ever 400.
+                          disabled={busy || !acc.credentialId || !companyId || !isSyncable(key)}
+                          onClick={() => isSyncable(key) && onSyncCredential(companyId, key, acc.credentialId)}
                         >
                           {busy ? <CircularProgress size={14} /> : <i className='tabler-refresh text-base' />}
                         </IconButton>
+                      </span>
+                    </Tooltip>
+                  </td>
+                  {/* Opens a real browser on the operator's own machine, via the
+                      local agent — a web page cannot launch one itself, and the
+                      automation server's Chrome appears on the server. */}
+                  <td className='text-center'>
+                    <Tooltip title={openAccountHint(agentReady, key, acc)}>
+                      <span>
+                        <Button
+                          size='small'
+                          variant='tonal'
+                          color='primary'
+                          disabled={
+                            !agentReady ||
+                            openingThis ||
+                            !AGENT_PLATFORMS.has(key) ||
+                            (!acc.password && key !== 'myntra')
+                          }
+                          startIcon={
+                            openingThis ? (
+                              <CircularProgress size={14} color='inherit' />
+                            ) : (
+                              <i className='tabler-browser' />
+                            )
+                          }
+                          onClick={() => onOpenAccount(key, acc)}
+                        >
+                          {openingThis ? 'Opening' : 'Open'}
+                        </Button>
                       </span>
                     </Tooltip>
                   </td>
@@ -475,6 +561,76 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   // of every company, so silently hiding the ones with nothing set up would be
   // a surprise — unlike Pending CMS, where they cannot be actioned at all.
   const account = useAccountFilter({ onChange: () => setPage(0) })
+
+  // ── Local agent ─────────────────────────────────────────────────────────
+  // Probed once on mount. null = still checking, so the button can say so
+  // rather than claiming the agent is down while the request is in flight.
+  const [agentReady, setAgentReady] = useState<boolean | null>(null)
+  const [opening, setOpening] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    let cancelled = false
+
+    // 2s ceiling: nothing is listening in the common case, and the button
+    // should settle quickly rather than sit on "checking".
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 2000)
+
+    fetch(`${AGENT_URL}/health`, { signal: controller.signal })
+      .then(res => res.ok)
+      .catch(() => false)
+      .then(ok => {
+        if (!cancelled) setAgentReady(ok)
+      })
+      .finally(() => clearTimeout(timer))
+
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+      controller.abort()
+    }
+  }, [])
+
+  const openAccount = useCallback(async (platform: FilterPlatformKey, acc: CredentialSync) => {
+    const key = `${platform}:${acc.username}`
+
+    setOpening(prev => new Set(prev).add(key))
+    setToast({ severity: 'warning', message: `Opening ${platform} as ${acc.username} — this takes up to a minute…` })
+
+    try {
+      const res = await fetch(`${AGENT_URL}/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform, username: acc.username, password: acc.password })
+      })
+
+      const json = await res.json().catch(() => null)
+
+      if (!res.ok || !json?.ok) {
+        // The agent leaves the window open on failure so the login can be
+        // finished by hand — say so rather than reporting a flat failure.
+        setToast({
+          severity: 'error',
+          message: json?.error ? `${json.error}${json.hint ? ` — ${json.hint}` : ''}` : `Open failed (${res.status})`
+        })
+
+        return
+      }
+
+      setToast({ severity: 'success', message: `${acc.username} is open (${json.method})` })
+    } catch (err: any) {
+      setAgentReady(false)
+      setToast({ severity: 'error', message: `Local agent unreachable at ${AGENT_URL} — start it with "pnpm agent"` })
+    } finally {
+      setOpening(prev => {
+        const next = new Set(prev)
+
+        next.delete(key)
+
+        return next
+      })
+    }
+  }, [])
 
   // ── Stuck-job cleanup ───────────────────────────────────────────────────
   // Opens on a dry run: the list of rows that WOULD be deleted is shown before
@@ -964,10 +1120,12 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
         enableSorting: false,
         cell: ({ row }) => (
           <div className='flex flex-col gap-0.5'>
-            {row.original.credentials.map(({ key, label, accounts }) => {
+            {/* Only the four platforms with master-data jobs: the others have
+                no lastSync to report and nothing to sync. */}
+            {row.original.credentials.filter(c => isSyncable(c.key)).map(({ key, label, accounts }) => {
               const busy = inFlight.has(`${row.original.companyId}:${key}`)
               const synced = accounts.filter(a => a.lastSync).length
-              const rollup = row.original.lastSync[key]
+              const rollup = isSyncable(key) ? row.original.lastSync[key] : ''
 
               return (
                 <div key={key} className='flex items-center gap-1 whitespace-nowrap'>
@@ -988,7 +1146,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
                       <IconButton
                         size='small'
                         disabled={busy || !row.original.companyId}
-                        onClick={() => runSyncForRowPlatform(row.original, key)}
+                        onClick={() => isSyncable(key) && runSyncForRowPlatform(row.original, key)}
                       >
                         {busy ? <CircularProgress size={14} /> : <i className='tabler-refresh text-base' />}
                       </IconButton>
@@ -1481,7 +1639,10 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
                           credentials={row.original.credentials}
                           companyId={row.original.companyId}
                           inFlight={inFlight}
+                          agentReady={agentReady}
+                          opening={opening}
                           onSyncCredential={runSyncForCredential}
+                          onOpenAccount={openAccount}
                         />
                       </td>
                     </tr>

@@ -15,7 +15,8 @@
     "postinstall": "prisma generate && npm run build:icons",
     "removeI18n": "tsx src/remove-translation-scripts/index.ts",
     "clean": "rm -rf .next",
-    "clear": "rm -rf node_modules .next"
+    "clear": "rm -rf node_modules .next",
+    "agent": "npm --prefix agent start"
   },
   "dependencies": {
     "@auth/prisma-adapter": "2.11.1",
