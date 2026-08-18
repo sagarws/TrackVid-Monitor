@@ -38,6 +38,10 @@ import {
 } from '@tanstack/react-table'
 import type { ColumnDef } from '@tanstack/react-table'
 
+// Config Imports
+import { PLATFORMS } from '@/configs/platforms'
+import type { PlatformKey as FilterPlatformKey } from '@/configs/platforms'
+
 // Component Imports
 import AccountCountFilter, { useAccountFilter } from '@/components/AccountCountFilter'
 import CopyableId from '@/components/CopyableId'
@@ -94,6 +98,14 @@ const PLATFORM_LABELS: { key: PlatformKey; label: string }[] = [
 ]
 
 const TRACKED_PLATFORMS: PlatformKey[] = ['ajio', 'myntra', 'snapdeal', 'meesho']
+
+// The Platform filter matches credentials by eComPlatform, which can be any of
+// the platforms TrackVid supports — not just the four with master-data sync
+// jobs. Never mutated; every setter builds a fresh object.
+const NO_PLATFORM_FILTERS = Object.fromEntries(PLATFORMS.map(p => [p.key, false])) as Record<
+  FilterPlatformKey,
+  boolean
+>
 
 // Rows per page. The larger sizes exist so a filtered set (e.g. "not synced
 // today") can be reviewed in one screen instead of paged through.
@@ -391,12 +403,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   // Matched in the DB, not on the current page: credentials are spread across
   // ~600 companies, so filtering a single page client-side would miss almost
   // every match and make the counts lie.
-  const [filterPlatforms, setFilterPlatforms] = useState<Record<PlatformKey, boolean>>({
-    ajio: false,
-    myntra: false,
-    snapdeal: false,
-    meesho: false
-  })
+  const [filterPlatforms, setFilterPlatforms] = useState<Record<FilterPlatformKey, boolean>>(NO_PLATFORM_FILTERS)
   const [filterNoCredentials, setFilterNoCredentials] = useState(false)
   // Yes/No are independent checkboxes; both (or neither) ticked means "don't care".
   const [filterVerifiedYes, setFilterVerifiedYes] = useState(false)
@@ -427,7 +434,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   const [jobsStaleMinutes, setJobsStaleMinutes] = useState(5)
 
   const selectedPlatforms = useMemo(
-    () => (Object.keys(filterPlatforms) as PlatformKey[]).filter(k => filterPlatforms[k]),
+    () => (Object.keys(filterPlatforms) as FilterPlatformKey[]).filter(k => filterPlatforms[k]),
     [filterPlatforms]
   )
 
@@ -459,7 +466,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     (account.payload ? 1 : 0)
 
   const clearFilters = useCallback(() => {
-    setFilterPlatforms({ ajio: false, myntra: false, snapdeal: false, meesho: false })
+    setFilterPlatforms(NO_PLATFORM_FILTERS)
     setFilterNoCredentials(false)
     setFilterVerifiedYes(false)
     setFilterVerifiedNo(false)
@@ -1129,7 +1136,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
                   Companies holding a credential on any ticked platform
                 </Typography>
                 <FormGroup>
-                  {PLATFORM_LABELS.map(({ key, label }) => (
+                  {PLATFORMS.map(({ key, label }) => (
                     <FilterCheck
                       key={key}
                       label={label}
@@ -1274,7 +1281,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
               size='small'
               variant='tonal'
               color='primary'
-              label={PLATFORM_LABELS.find(p => p.key === key)?.label ?? key}
+              label={PLATFORMS.find(p => p.key === key)?.label ?? key}
               onDelete={() => {
                 setFilterPlatforms(prev => ({ ...prev, [key]: false }))
                 setPage(0)

@@ -32,6 +32,10 @@ import type { ColumnDef } from '@tanstack/react-table'
 // Hook Imports
 import useElementWidth from '@/hooks/useElementWidth'
 
+// Config Imports
+import { PLATFORMS } from '@/configs/platforms'
+import type { PlatformKey } from '@/configs/platforms'
+
 // Component Imports
 import AccountCountFilter, { useAccountFilter } from '@/components/AccountCountFilter'
 import CopyableId from '@/components/CopyableId'
@@ -93,16 +97,6 @@ export type PendingCompanyRow = {
   claims: PendingClaim[]
 }
 
-// The report is per-platform: the BE lower-cases whatever is sent and matches
-// the stored casing variants, so plain lowercase keys are safe here.
-const PLATFORMS = [
-  { key: 'myntra', label: 'Myntra' },
-  { key: 'ajio', label: 'Ajio' },
-  { key: 'snapdeal', label: 'Snapdeal' },
-  { key: 'meesho', label: 'Meesho' }
-] as const
-
-type PlatformKey = (typeof PLATFORMS)[number]['key']
 
 // Companies per page (each row carries all of its pending claims), so the
 // smaller sizes are the useful default — 200 companies is 200 claim lists.
@@ -320,11 +314,17 @@ const relativeToNow = (iso: string | null) => {
 const CredentialsPanel = ({
   credentials,
   platform,
-  onViewSession
+  renewing,
+  onViewSession,
+  onRenewSession
 }: {
   credentials: PlatformCredential[]
   platform: PlatformKey
+  // credentialIds with a renewal in flight — the login takes ~30-60s, so the
+  // row has to say so for the whole of it.
+  renewing: Set<string>
   onViewSession: (credential: PlatformCredential) => void
+  onRenewSession: (credential: PlatformCredential) => void
 }) => {
   const isMyntra = platform === 'myntra'
 
@@ -337,7 +337,7 @@ const CredentialsPanel = ({
             <th className='is-[140px]'>Type</th>
             <th className='is-[160px]'>Vendor code</th>
             <th className='is-[140px]'>Verified</th>
-            {isMyntra && <th className='is-[180px]'>Myntra session</th>}
+            {isMyntra && <th className='is-[280px]'>Myntra session</th>}
             {isMyntra && <th className='is-[90px] text-center'>View</th>}
           </tr>
         </thead>
@@ -353,6 +353,7 @@ const CredentialsPanel = ({
           ) : (
             credentials.map((cred, i) => {
               const state = sessionState(cred.myntraSession)
+              const busy = renewing.has(cred.credentialId)
 
               return (
                 <tr key={cred.credentialId || `${cred.username}-${i}`}>
@@ -385,17 +386,41 @@ const CredentialsPanel = ({
                   </td>
                   {isMyntra && (
                     <td>
-                      <Tooltip
-                        title={
-                          cred.myntraSession?.expiresAt
-                            ? `Expires ${formatInstant(cred.myntraSession.expiresAt)} (${relativeToNow(
-                                cred.myntraSession.expiresAt
-                              )})`
-                            : 'No cookie jar stored for this account'
-                        }
-                      >
-                        <Chip size='small' variant='tonal' color={state.color} label={state.label} />
-                      </Tooltip>
+                      <div className='flex items-center gap-2'>
+                        <Tooltip
+                          title={
+                            cred.myntraSession?.expiresAt
+                              ? `Expires ${formatInstant(cred.myntraSession.expiresAt)} (${relativeToNow(
+                                  cred.myntraSession.expiresAt
+                                )})`
+                              : 'No cookie jar stored for this account'
+                          }
+                        >
+                          <Chip size='small' variant='tonal' color={state.color} label={state.label} />
+                        </Tooltip>
+                        <Tooltip
+                          title={
+                            busy
+                              ? 'Logging in to Myntra — this takes up to a minute'
+                              : 'Run a fresh Myntra login and store the new cookie jar'
+                          }
+                        >
+                          <span>
+                            <Button
+                              size='small'
+                              variant='tonal'
+                              color='primary'
+                              disabled={busy || !cred.credentialId}
+                              startIcon={
+                                busy ? <CircularProgress size={14} color='inherit' /> : <i className='tabler-refresh' />
+                              }
+                              onClick={() => onRenewSession(cred)}
+                            >
+                              {busy ? 'Renewing' : 'Renew'}
+                            </Button>
+                          </span>
+                        </Tooltip>
+                      </div>
                     </td>
                   )}
                   {isMyntra && (
@@ -442,8 +467,10 @@ const PendingClaimsPanel = ({
   companyName,
   width,
   selected,
+  renewing,
   onToggleClaim,
-  onViewSession
+  onViewSession,
+  onRenewSession
 }: {
   claims: PendingClaim[]
   credentials: PlatformCredential[]
@@ -452,8 +479,10 @@ const PendingClaimsPanel = ({
   companyName: string
   width: number
   selected: Record<string, SelectedClaim>
+  renewing: Set<string>
   onToggleClaim: (claim: PendingClaim, companyId: string, companyName: string) => void
   onViewSession: (credential: PlatformCredential) => void
+  onRenewSession: (credential: PlatformCredential) => void
 }) => (
   <div className='bg-actionHover plb-4 pli-6 border-bs'>
     <div
@@ -461,7 +490,13 @@ const PendingClaimsPanel = ({
       // content rather than drifting to different right edges.
       style={width ? { inlineSize: Math.max(240, width - 48) } : undefined}
     >
-      <CredentialsPanel credentials={credentials} platform={platform} onViewSession={onViewSession} />
+      <CredentialsPanel
+        credentials={credentials}
+        platform={platform}
+        renewing={renewing}
+        onViewSession={onViewSession}
+        onRenewSession={onRenewSession}
+      />
     </div>
     <div
       className='overflow-auto rounded border max-bs-[520px]'
@@ -602,6 +637,8 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   const [toast, setToast] = useState<Toast | null>(null)
   // Credential whose Myntra session is open in the modal; null = closed.
   const [sessionCredential, setSessionCredential] = useState<PlatformCredential | null>(null)
+  // credentialIds with a renewal in flight.
+  const [renewing, setRenewing] = useState<Set<string>>(new Set())
 
   // ── Bulk script-status change ───────────────────────────────────────────
   // Defaults match the BE's own defaults and the flow this exists for:
@@ -788,6 +825,73 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   }, [selectedIds, selected])
 
   const selectedCompanyNames = useMemo(() => selectedCompanies.map(c => c.companyName), [selectedCompanies])
+
+  // Force a fresh Myntra login for one credential. The request blocks for the
+  // whole Selenium login (~30-60s), so the row shows a spinner rather than the
+  // page doing anything modal — other companies stay usable meanwhile.
+  const renewSession = useCallback(
+    async (credential: PlatformCredential) => {
+      if (!credential.credentialId) return
+
+      // The credential belongs to whichever company row it was rendered under;
+      // find that row rather than threading the id through every callback.
+      const owner = rows.find(row => row.credentials.some(c => c.credentialId === credential.credentialId))
+
+      if (!owner?.companyId) {
+        setToast({ severity: 'error', message: 'Could not resolve the company for this credential' })
+
+        return
+      }
+
+      setRenewing(prev => new Set(prev).add(credential.credentialId))
+      setToast({ severity: 'info', message: `Logging in to Myntra as ${credential.username}…` })
+
+      try {
+        const res = await fetch('/api/cms/renew-myntra-session', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ companyId: owner.companyId, credentialId: credential.credentialId })
+        })
+
+        const json = await res.json().catch(() => null)
+
+        if (!res.ok || !json?.isSuccess) {
+          setToast({
+            severity: 'error',
+            message: json?.displayMessage || json?.message || `Renewal failed (${res.status})`
+          })
+
+          return
+        }
+
+        const expiresAt = json.data?.expiresAt
+
+        setToast({
+          severity: 'success',
+          message: expiresAt
+            ? `Session renewed for ${credential.username} — expires ${relativeToNow(expiresAt)}`
+            : `Session renewed for ${credential.username}`
+        })
+
+        // Refetch rather than patching the row locally: the same jar can be
+        // shared by the same Myntra account under another company, and the
+        // reload picks all of those up.
+        fetchRows()
+      } catch (err: any) {
+        setToast({ severity: 'error', message: err?.message || 'Renewal request failed' })
+      } finally {
+        setRenewing(prev => {
+          const next = new Set(prev)
+
+          next.delete(credential.credentialId)
+
+          return next
+        })
+      }
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, fetchRows]
+  )
 
   const runProcessClaims = async () => {
     if (processableSelectedIds.length === 0) return
@@ -1315,8 +1419,10 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
                           companyName={row.original.companyName}
                           width={scrollerWidth}
                           selected={selected}
+                          renewing={renewing}
                           onToggleClaim={toggleClaim}
                           onViewSession={setSessionCredential}
+                          onRenewSession={renewSession}
                         />
                       </td>
                     </tr>

@@ -23,6 +23,9 @@ import type { ColumnDef } from '@tanstack/react-table'
 // Hook Imports
 import useElementWidth from '@/hooks/useElementWidth'
 
+// Config Imports
+import { PLATFORMS } from '@/configs/platforms'
+
 // Component Imports
 import CustomTextField from '@core/components/mui/TextField'
 
@@ -34,6 +37,10 @@ export type VmsOrder = {
   orderId: string
   AWBNumber: string
   orderType: string
+  // Resolved by the BE from the matching order row, for the current page only.
+  // null when no order matched the AWB (or the lookup was capped) — which is
+  // not the same as an order whose platform is blank.
+  eCommercePlatform: string | null
 }
 
 // A feed carries the two arrays separately; `state` is attached when they are
@@ -88,8 +95,18 @@ const mapOrders = (orders: any): VmsOrder[] =>
   (Array.isArray(orders) ? orders : []).map((o: any) => ({
     orderId: String(o?._id ?? ''),
     AWBNumber: String(o?.AWBNumber ?? ''),
-    orderType: String(o?.orderType ?? '')
+    orderType: String(o?.orderType ?? ''),
+    eCommercePlatform: o?.eCommercePlatform ? String(o.eCommercePlatform) : null
   }))
+
+// The stored value is free text in mixed casing ("AJIO" / "ajio" / "Ajio"), so
+// it is matched case-insensitively against the shared list and rendered with
+// that list's label. An unrecognised value is shown as-is rather than dropped.
+const platformLabel = (value: string | null) => {
+  if (!value) return null
+
+  return PLATFORMS.find(p => p.key === value.trim().toLowerCase())?.label ?? value
+}
 
 const mapCompanyToRow = (c: any): VmsCompanyRow => ({
   companyId: String(c?.companyId ?? ''),
@@ -145,6 +162,7 @@ const VmsOrdersPanel = ({
               <th className='is-[60px]'>#</th>
               <th className='is-[220px]'>AWB</th>
               <th className='is-[140px]'>Order type</th>
+              <th className='is-[140px]'>Platform</th>
               <th className='is-[120px]'>State</th>
               <th>Order id</th>
             </tr>
@@ -159,7 +177,7 @@ const VmsOrdersPanel = ({
                         {feed.feedName}
                       </Typography>
                     </td>
-                    <td colSpan={5}>
+                    <td colSpan={6}>
                       <Typography variant='body2' color='text.disabled'>
                         {stateFilter === 'all'
                           ? 'No stuck orders'
@@ -194,6 +212,17 @@ const VmsOrdersPanel = ({
                   </td>
                   <td>
                     <Typography variant='body2'>{order.orderType || '—'}</Typography>
+                  </td>
+                  <td>
+                    {platformLabel(order.eCommercePlatform) ? (
+                      <Chip size='small' variant='tonal' color='primary' label={platformLabel(order.eCommercePlatform)} />
+                    ) : (
+                      <Tooltip title='No order row matched this AWB, so its platform is unknown'>
+                        <Typography variant='body2' color='text.disabled'>
+                          —
+                        </Typography>
+                      </Tooltip>
+                    )}
                   </td>
                   <td>
                     <Chip
