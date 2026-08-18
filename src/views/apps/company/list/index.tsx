@@ -116,7 +116,12 @@ const isSyncable = (key: FilterPlatformKey): key is PlatformKey => TRACKED_PLATF
 // logs in, and leaves the window open. A web page cannot launch a browser
 // itself, and the automation server's Chrome opens on the server — neither
 // gets a human into a seller portal.
-const AGENT_URL = process.env.NEXT_PUBLIC_LOCAL_AGENT_URL || 'http://127.0.0.1:7788'
+// Same-origin by default: /api/agent/* is proxied to the agent by the Next
+// server (see src/app/api/agent/[...path]/route.ts), which keeps everything on
+// port 4001 — no CORS allowlist, no Private Network Access preflight. Override
+// with the agent's own URL if the Monitor is ever served from a shared host,
+// where the browser must reach each operator's local agent directly.
+const AGENT_URL = process.env.NEXT_PUBLIC_LOCAL_AGENT_URL || '/api/agent'
 
 // Platforms the agent carries a login flow for. Kept in step with
 // agent/logins/index.js — a key missing here just disables the button.
@@ -133,7 +138,7 @@ const AGENT_PLATFORMS = new Set<FilterPlatformKey>([
 
 const openAccountHint = (agentReady: boolean | null, platform: FilterPlatformKey, account: CredentialSync) => {
   if (agentReady === null) return 'Checking for the local agent…'
-  if (!agentReady) return `Local agent not running — start it with "pnpm agent" (expected at ${AGENT_URL})`
+  if (!agentReady) return 'Local browser agent not running — run "cd agent && npm install", then restart "pnpm dev"'
   if (!AGENT_PLATFORMS.has(platform)) return 'No login flow for this platform yet'
   if (!account.password && platform !== 'myntra') return 'No password stored — cannot log in'
 
@@ -568,28 +573,60 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   const [agentReady, setAgentReady] = useState<boolean | null>(null)
   const [opening, setOpening] = useState<Set<string>>(new Set())
 
-  useEffect(() => {
-    let cancelled = false
-
-    // 2s ceiling: nothing is listening in the common case, and the button
-    // should settle quickly rather than sit on "checking".
+  // 8s, not 2s: the first hit to /api/agent/health on a fresh dev server has to
+  // compile the route, which alone takes ~3s. A shorter ceiling aborts a probe
+  // that was about to succeed and reports a running agent as dead.
+  const probeAgent = useCallback(async (signal?: AbortSignal) => {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 2000)
+    const timer = setTimeout(() => controller.abort(), 8000)
 
-    fetch(`${AGENT_URL}/health`, { signal: controller.signal })
-      .then(res => res.ok)
-      .catch(() => false)
-      .then(ok => {
-        if (!cancelled) setAgentReady(ok)
-      })
-      .finally(() => clearTimeout(timer))
+    signal?.addEventListener('abort', () => controller.abort(), { once: true })
 
-    return () => {
-      cancelled = true
+    try {
+      const res = await fetch(`${AGENT_URL}/health`, { signal: controller.signal })
+
+      return res.ok
+    } catch {
+      return false
+    } finally {
       clearTimeout(timer)
-      controller.abort()
     }
   }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+
+    const check = async () => {
+      let ok = await probeAgent(controller.signal)
+
+      // One retry: on a cold dev server the first request can lose the race
+      // against route compilation even inside 8s.
+      if (!ok && !controller.signal.aborted) {
+        await new Promise(resolve => setTimeout(resolve, 1500))
+        if (!controller.signal.aborted) ok = await probeAgent(controller.signal)
+      }
+
+      if (!controller.signal.aborted) setAgentReady(ok)
+    }
+
+    check()
+
+    // Re-check when the tab regains focus. The common sequence is "open the
+    // Monitor, notice the button is disabled, go start the agent, come back" —
+    // without this the tab would keep insisting the agent is down until reload.
+    const onFocus = () => {
+      probeAgent().then(ok => {
+        if (!controller.signal.aborted) setAgentReady(prev => (prev === ok ? prev : ok))
+      })
+    }
+
+    window.addEventListener('focus', onFocus)
+
+    return () => {
+      controller.abort()
+      window.removeEventListener('focus', onFocus)
+    }
+  }, [probeAgent])
 
   const openAccount = useCallback(async (platform: FilterPlatformKey, acc: CredentialSync) => {
     const key = `${platform}:${acc.username}`
@@ -620,7 +657,10 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
       setToast({ severity: 'success', message: `${acc.username} is open (${json.method})` })
     } catch (err: any) {
       setAgentReady(false)
-      setToast({ severity: 'error', message: `Local agent unreachable at ${AGENT_URL} — start it with "pnpm agent"` })
+      setToast({
+        severity: 'error',
+        message: 'Local browser agent unreachable — run "cd agent && npm install", then restart "pnpm dev"'
+      })
     } finally {
       setOpening(prev => {
         const next = new Set(prev)
@@ -694,9 +734,24 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   // Which company rows have their per-credential sync panel open.
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
-  const toggleExpanded = useCallback((companyId: string) => {
-    setExpanded(prev => ({ ...prev, [companyId]: !prev[companyId] }))
-  }, [])
+  const toggleExpanded = useCallback(
+    (companyId: string) => {
+      setExpanded(prev => {
+        const opening = !prev[companyId]
+
+        // Expanding a row is exactly when the Open account button starts to
+        // matter, so take the chance to re-check a previously-failed probe.
+        if (opening && agentReady === false) {
+          probeAgent().then(ok => {
+            if (ok) setAgentReady(true)
+          })
+        }
+
+        return { ...prev, [companyId]: opening }
+      })
+    },
+    [agentReady, probeAgent]
+  )
 
   // Debounce search input so we don't spam the API on every keystroke, and
   // reset to page 1 whenever the term changes so the user sees results from

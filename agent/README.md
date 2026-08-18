@@ -13,11 +13,26 @@ seller portal. This process runs where you are.
 
 ```bash
 cd agent && npm install     # once
-pnpm agent                  # from the repo root, any time after
+pnpm dev                    # from the repo root — starts Next AND the agent
 ```
 
-It listens on `127.0.0.1:7788` (loopback only). The Monitor probes `/health` on
-page load and enables the button when it answers.
+`pnpm dev` runs `agent/dev-runner.mjs`, which starts both processes. If
+`agent/node_modules` is missing it prints a warning and brings up the Monitor
+anyway — a missing agent only disables **Open account**, it never blocks
+front-end work. `pnpm dev:next` starts Next alone; `pnpm agent` starts the agent
+alone.
+
+The agent listens on `127.0.0.1:7788`, but the browser never talks to it
+directly: the Monitor calls `/api/agent/*` on port 4001 and the Next server
+forwards (`src/app/api/agent/[...path]/route.ts`). One port, one origin, no CORS
+and no Private Network Access preflight. That proxy is session-gated, so an
+unauthenticated caller cannot drive the agent through it.
+
+It works this way because the Next server runs on the same machine as the agent
+— true for `pnpm dev`, and the premise of a local agent. If the Monitor is ever
+served from a shared host, set `NEXT_PUBLIC_LOCAL_AGENT_URL` to the agent's own
+URL and the browser will call each operator's agent directly instead (the CORS
+allowlist below is what makes that work).
 
 ## What happens on click
 
