@@ -45,6 +45,7 @@ import type { PlatformKey as FilterPlatformKey } from '@/configs/platforms'
 // Component Imports
 import AccountCountFilter, { useAccountFilter } from '@/components/AccountCountFilter'
 import CopyableId from '@/components/CopyableId'
+import CopyButton from '@/components/CopyButton'
 import FilterCheck from '@/components/FilterCheck'
 import CustomTextField from '@core/components/mui/TextField'
 
@@ -58,6 +59,9 @@ import tableStyles from '@core/styles/table.module.css'
 export type CredentialSync = {
   credentialId: string
   username: string
+  // Plaintext marketplace password, as stored. Rendered masked behind a reveal
+  // toggle — see CredentialSyncPanel.
+  password: string
   isVerified: boolean
   lastSync: string // ISO string, '' when never synced
 }
@@ -137,6 +141,7 @@ const pickCredentials = (loginInfo: any): PlatformCredentials[] => {
     const accounts: CredentialSync[] = (Array.isArray(entry?.info) ? entry.info : []).map((acc: any) => ({
       credentialId: String(acc?._id ?? ''),
       username: String(acc?.username ?? '—'),
+      password: String(acc?.password ?? ''),
       isVerified: acc?.is_verified !== false, // undefined = legacy cred, treat as verified
       lastSync: toIsoDate(acc?.masterDataSync)
     }))
@@ -265,7 +270,17 @@ const CredentialSyncPanel = ({
   companyId: string
   inFlight: Set<string>
   onSyncCredential: (companyId: string, platform: PlatformKey, credentialId: string) => void
-}) => (
+}) => {
+  // Which passwords are currently revealed, by credentialId. Masked by default
+  // and never persisted: this panel is opened on shared screens, and a password
+  // that stays visible after the reason for looking at it has passed is the
+  // failure mode worth designing against. Copy works without revealing.
+  const [revealed, setRevealed] = useState<Record<string, boolean>>({})
+
+  const toggleReveal = (credentialId: string) =>
+    setRevealed(prev => ({ ...prev, [credentialId]: !prev[credentialId] }))
+
+  return (
   // A real table rather than stacked flex rows: the account and its timestamp
   // belong in aligned columns, otherwise they drift to opposite edges of a wide
   // viewport and stop reading as a pair. Platform is a rowSpan cell so each
@@ -321,10 +336,50 @@ const CredentialSyncPanel = ({
                       </Typography>
                     </td>
                   )}
+                  {/* Password sits under the username rather than in its own
+                      column: the two are one credential, and splitting them put
+                      a wide gap between the pair on a full-width viewport. */}
                   <td>
-                    <Typography variant='body2' color='text.primary' className='break-all'>
-                      {acc.username}
-                    </Typography>
+                    <div className='flex flex-col gap-0.5'>
+                      <div className='flex items-center gap-1'>
+                        <Typography variant='body2' color='text.primary' className='break-all'>
+                          {acc.username}
+                        </Typography>
+                        <CopyButton value={acc.username} label='username' />
+                      </div>
+                      {acc.password ? (
+                        <div className='flex items-center gap-1'>
+                          <Typography
+                            variant='caption'
+                            color={revealed[acc.credentialId] ? 'text.primary' : 'text.disabled'}
+                            className={revealed[acc.credentialId] ? 'font-mono break-all' : 'tracking-widest'}
+                          >
+                            {revealed[acc.credentialId] ? acc.password : '••••••••'}
+                          </Typography>
+                          <Tooltip title={revealed[acc.credentialId] ? 'Hide password' : 'Show password'}>
+                            <IconButton
+                              size='small'
+                              className='p-1'
+                              onClick={() => toggleReveal(acc.credentialId)}
+                              aria-label={revealed[acc.credentialId] ? 'Hide password' : 'Show password'}
+                            >
+                              <i
+                                className={
+                                  revealed[acc.credentialId] ? 'tabler-eye-off text-sm' : 'tabler-eye text-sm'
+                                }
+                              />
+                            </IconButton>
+                          </Tooltip>
+                          <CopyButton value={acc.password} label='password' />
+                        </div>
+                      ) : (
+                        <Tooltip title='No password stored — the automation cannot log in with this credential'>
+                          <Typography variant='caption' color='text.disabled'>
+                            No password
+                          </Typography>
+                        </Tooltip>
+                      )}
+                    </div>
                   </td>
                   <td>
                     {acc.isVerified ? (
@@ -373,7 +428,8 @@ const CredentialSyncPanel = ({
       </table>
     </div>
   </div>
-)
+  )
+}
 
 const columnHelper = createColumnHelper<CompanyRow>()
 
