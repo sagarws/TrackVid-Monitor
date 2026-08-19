@@ -12,8 +12,13 @@ import CardHeader from '@mui/material/CardHeader'
 import Checkbox from '@mui/material/Checkbox'
 import Chip from '@mui/material/Chip'
 import CircularProgress from '@mui/material/CircularProgress'
+import Dialog from '@mui/material/Dialog'
+import DialogActions from '@mui/material/DialogActions'
+import DialogContent from '@mui/material/DialogContent'
+import DialogTitle from '@mui/material/DialogTitle'
 import Divider from '@mui/material/Divider'
 import IconButton from '@mui/material/IconButton'
+import Menu from '@mui/material/Menu'
 import MenuItem from '@mui/material/MenuItem'
 import Pagination from '@mui/material/Pagination'
 import Snackbar from '@mui/material/Snackbar'
@@ -37,9 +42,17 @@ type QueueSummary = {
   description: string
   counts: Record<string, number>
   isPaused: boolean
+  // BullMQ 5 global concurrency. null = unset, so each worker's own setting
+  // applies — which is not the same as 0.
+  concurrency: number | null
   reachable: boolean
   error: string | null
 }
+
+// Queue-level operations, mirroring Bull Board's kebab menu. `reset` is
+// obliterate: it is the only irreversible one, so it is separated visually and
+// gated behind typing the queue name.
+type QueueAction = 'pause' | 'resume' | 'empty' | 'reset' | 'set-concurrency' | 'add-job'
 
 type QueueJob = {
   id: string
@@ -103,6 +116,16 @@ const QueuesView = () => {
   const [acting, setActing] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+
+  // ── Queue-level menu ────────────────────────────────────────────────────
+  const [menuAnchor, setMenuAnchor] = useState<null | HTMLElement>(null)
+  // Which action's dialog is open. pause/resume need no dialog and fire
+  // straight from the menu.
+  const [dialog, setDialog] = useState<null | 'empty' | 'reset' | 'set-concurrency' | 'add-job'>(null)
+  const [concurrencyValue, setConcurrencyValue] = useState('')
+  const [resetConfirm, setResetConfirm] = useState('')
+  const [jobName, setJobName] = useState('manual')
+  const [jobData, setJobData] = useState('{}')
 
   const fetchQueues = useCallback(async () => {
     setQueuesLoading(true)
@@ -211,6 +234,36 @@ const QueuesView = () => {
       setSelected({})
       fetchJobs()
       fetchQueues()
+    } catch (err: any) {
+      setToast({ severity: 'error', message: err?.message || 'Action failed' })
+    } finally {
+      setActing(false)
+    }
+  }
+
+  const runQueueAction = async (action: QueueAction, extra: Record<string, unknown> = {}) => {
+    setActing(true)
+
+    try {
+      const res = await fetch('/api/queues/queue-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queue: activeQueue, action, ...extra })
+      })
+
+      const json = await res.json().catch(() => null)
+
+      if (!res.ok || !json?.isSuccess) {
+        setToast({ severity: 'error', message: json?.displayMessage || json?.message || `Request failed (${res.status})` })
+
+        return
+      }
+
+      setToast({ severity: 'success', message: json.displayMessage || json.message || 'Done' })
+      setDialog(null)
+      setResetConfirm('')
+      fetchQueues()
+      fetchJobs()
     } catch (err: any) {
       setToast({ severity: 'error', message: err?.message || 'Action failed' })
     } finally {
@@ -372,9 +425,80 @@ const QueuesView = () => {
                   </MenuItem>
                 ))}
               </CustomTextField>
+              <Tooltip title='Queue actions'>
+                <IconButton onClick={e => setMenuAnchor(e.currentTarget)} aria-label='Queue actions'>
+                  <i className='tabler-dots-vertical' />
+                </IconButton>
+              </Tooltip>
+              <Menu anchorEl={menuAnchor} open={Boolean(menuAnchor)} onClose={() => setMenuAnchor(null)}>
+                <MenuItem
+                  onClick={() => {
+                    setMenuAnchor(null)
+                    setJobName('manual')
+                    setJobData('{}')
+                    setDialog('add-job')
+                  }}
+                >
+                  <i className='tabler-square-plus text-base mie-2' /> Add job
+                </MenuItem>
+                {/* One entry, not two: a queue is either paused or it is not,
+                    and offering the inapplicable one is a dead click. */}
+                <MenuItem
+                  onClick={() => {
+                    setMenuAnchor(null)
+                    runQueueAction(current?.isPaused ? 'resume' : 'pause')
+                  }}
+                >
+                  <i className={`${current?.isPaused ? 'tabler-player-play' : 'tabler-player-pause'} text-base mie-2`} />
+                  {current?.isPaused ? 'Resume' : 'Pause'}
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    setMenuAnchor(null)
+                    setConcurrencyValue(current?.concurrency != null ? String(current.concurrency) : '')
+                    setDialog('set-concurrency')
+                  }}
+                >
+                  <i className='tabler-adjustments-horizontal text-base mie-2' /> Set concurrency
+                </MenuItem>
+                <MenuItem
+                  onClick={() => {
+                    setMenuAnchor(null)
+                    setDialog('empty')
+                  }}
+                >
+                  <i className='tabler-trash text-base mie-2' /> Empty
+                </MenuItem>
+                <Divider />
+                <MenuItem
+                  onClick={() => {
+                    setMenuAnchor(null)
+                    setResetConfirm('')
+                    setDialog('reset')
+                  }}
+                  className='text-error'
+                >
+                  <i className='tabler-alert-triangle text-base mie-2' /> Reset queue
+                </MenuItem>
+              </Menu>
             </div>
           }
         />
+        {(current?.isPaused || current?.concurrency != null) && (
+          <div className='flex items-center gap-2 flex-wrap pli-6 pbe-3'>
+            {current?.isPaused && (
+              <Chip
+                size='small'
+                variant='tonal'
+                color='warning'
+                label='Paused — workers are not taking new jobs'
+              />
+            )}
+            {current?.concurrency != null && (
+              <Chip size='small' variant='tonal' color='info' label={`Global concurrency: ${current.concurrency}`} />
+            )}
+          </div>
+        )}
         <Tabs
           value={status}
           onChange={(_, value) => setStatus(value as Status)}
@@ -562,6 +686,119 @@ const QueuesView = () => {
           />
         </div>
       </Card>
+
+      <Dialog open={Boolean(dialog)} onClose={() => (acting ? null : setDialog(null))} maxWidth='xs' fullWidth>
+        <DialogTitle>
+          {dialog === 'add-job' && 'Add job'}
+          {dialog === 'set-concurrency' && 'Set concurrency'}
+          {dialog === 'empty' && 'Empty queue'}
+          {dialog === 'reset' && 'Reset queue'}
+        </DialogTitle>
+        <DialogContent>
+          <div className='flex flex-col gap-4 pbs-2'>
+            {dialog === 'add-job' && (
+              <>
+                <Typography variant='body2'>
+                  Enqueue a job on <strong>{current?.label}</strong> by hand — useful for replaying a payload copied
+                  from the table below.
+                </Typography>
+                <CustomTextField fullWidth label='Job name' value={jobName} onChange={e => setJobName(e.target.value)} />
+                <CustomTextField
+                  fullWidth
+                  multiline
+                  minRows={4}
+                  label='Payload (JSON)'
+                  value={jobData}
+                  onChange={e => setJobData(e.target.value)}
+                  placeholder='{ "mailboxId": "..." }'
+                />
+              </>
+            )}
+
+            {dialog === 'set-concurrency' && (
+              <>
+                <Typography variant='body2'>
+                  How many jobs <strong>{current?.label}</strong> may run at once across every worker.
+                </Typography>
+                <CustomTextField
+                  fullWidth
+                  type='number'
+                  label='Global concurrency'
+                  value={concurrencyValue}
+                  onChange={e => setConcurrencyValue(e.target.value)}
+                  placeholder='e.g. 5'
+                />
+                <Typography variant='caption' color='text.secondary'>
+                  0 clears the global limit and hands control back to each worker&apos;s own concurrency setting.
+                  Currently {current?.concurrency != null ? current.concurrency : 'unset'}.
+                </Typography>
+              </>
+            )}
+
+            {dialog === 'empty' && (
+              <>
+                <Typography variant='body2'>
+                  Drop every <strong>waiting</strong> and <strong>delayed</strong> job on {current?.label}. Jobs already
+                  running are left to finish.
+                </Typography>
+                <Alert severity='warning'>
+                  {Number(counts.waiting ?? 0) + Number(counts.delayed ?? 0)} job(s) would be dropped. Delayed retries
+                  go too — otherwise they refill the queue minutes later.
+                </Alert>
+              </>
+            )}
+
+            {dialog === 'reset' && (
+              <>
+                <Typography variant='body2'>
+                  Remove <strong>{current?.label}</strong> and every job in it, including jobs currently running.
+                </Typography>
+                <Alert severity='error'>
+                  This cannot be undone, and it discards in-flight work for every company on this queue.
+                </Alert>
+                <CustomTextField
+                  fullWidth
+                  label={`Type "${activeQueue}" to confirm`}
+                  value={resetConfirm}
+                  onChange={e => setResetConfirm(e.target.value)}
+                />
+              </>
+            )}
+          </div>
+        </DialogContent>
+        <DialogActions>
+          <Button color='secondary' onClick={() => setDialog(null)} disabled={acting}>
+            Cancel
+          </Button>
+          <Button
+            variant='contained'
+            color={dialog === 'reset' || dialog === 'empty' ? 'error' : 'primary'}
+            disabled={
+              acting ||
+              (dialog === 'reset' && resetConfirm !== activeQueue) ||
+              (dialog === 'set-concurrency' && concurrencyValue.trim() === '')
+            }
+            onClick={() => {
+              if (dialog === 'add-job') runQueueAction('add-job', { jobName, jobData })
+              else if (dialog === 'set-concurrency') runQueueAction('set-concurrency', { concurrency: Number(concurrencyValue) })
+              else if (dialog === 'empty') runQueueAction('empty')
+              else if (dialog === 'reset') runQueueAction('reset', { confirm: resetConfirm })
+            }}
+          >
+            {acting ? (
+              <CircularProgress size={20} color='inherit' />
+            ) : dialog === 'add-job' ? (
+              'Add job'
+            ) : dialog === 'set-concurrency' ? (
+              'Save'
+            ) : dialog === 'empty' ? (
+              'Empty queue'
+            ) : (
+              'Reset queue'
+            )}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Snackbar
         open={Boolean(toast)}
