@@ -45,6 +45,10 @@ type QueueSummary = {
   // BullMQ 5 global concurrency. null = unset, so each worker's own setting
   // applies — which is not the same as 0.
   concurrency: number | null
+  // Consumers attached right now. Zero means nothing is running this queue —
+  // jobs will sit in Waiting forever rather than being slow.
+  workerCount: number
+  workerNames: string[]
   reachable: boolean
   error: string | null
 }
@@ -330,6 +334,24 @@ const QueuesView = () => {
                       </Typography>
                       {queue.isPaused && <Chip size='small' variant='tonal' color='warning' label='Paused' />}
                       {!queue.reachable && <Chip size='small' variant='tonal' color='error' label='Unreachable' />}
+                      {/* The signal that separates "backed up" from "nothing is
+                          running this at all". Without it a correctly-queued job
+                          with no consumer looks identical to a stuck one. */}
+                      {queue.reachable && queue.workerCount === 0 && (
+                        <Tooltip title='No process is consuming this queue — jobs will stay in Waiting until a worker starts'>
+                          <Chip size='small' variant='tonal' color='error' label='No workers attached' />
+                        </Tooltip>
+                      )}
+                      {queue.reachable && queue.workerCount > 0 && (
+                        <Tooltip title={queue.workerNames.join(', ') || 'Attached workers'}>
+                          <Chip
+                            size='small'
+                            variant='tonal'
+                            color='success'
+                            label={`${queue.workerCount} worker${queue.workerCount === 1 ? '' : 's'}`}
+                          />
+                        </Tooltip>
+                      )}
                     </div>
                     <Typography variant='caption' color='text.secondary'>
                       {queue.error || queue.description}
@@ -353,6 +375,14 @@ const QueuesView = () => {
                         )
                       })}
                     </div>
+                    {/* Named explicitly because it is the case that reads as a
+                        bug: jobs queued, nothing consuming them. */}
+                    {queue.reachable && queue.workerCount === 0 && Number(queue.counts?.waiting ?? 0) > 0 && (
+                      <Typography variant='caption' color='error.main'>
+                        {queue.counts.waiting} job(s) waiting with no worker running — start the worker process, or
+                        check whether a runtime guard refused to start it
+                      </Typography>
+                    )}
                     {failed > 0 && isActive && (
                       <Typography variant='caption' color='error.main'>
                         {failed} failed job{failed === 1 ? '' : 's'} — open the Failed tab to retry
