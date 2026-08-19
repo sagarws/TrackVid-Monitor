@@ -3,6 +3,9 @@
 // React Imports
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+// Next Imports
+import { useParams, useRouter } from 'next/navigation'
+
 // MUI Imports
 import Card from '@mui/material/Card'
 import CardHeader from '@mui/material/CardHeader'
@@ -41,6 +44,9 @@ import type { ColumnDef } from '@tanstack/react-table'
 // Config Imports
 import { PLATFORMS } from '@/configs/platforms'
 import type { PlatformKey as FilterPlatformKey } from '@/configs/platforms'
+
+// Hook Imports
+import usePersistedSearch from '@/hooks/usePersistedSearch'
 
 // Component Imports
 import AccountCountFilter, { useAccountFilter } from '@/components/AccountCountFilter'
@@ -103,12 +109,12 @@ const PLATFORM_LABELS: { key: PlatformKey; label: string }[] = [
   { key: 'meesho', label: 'Meesho' }
 ]
 
-const TRACKED_PLATFORMS: PlatformKey[] = ['ajio', 'myntra', 'snapdeal', 'meesho']
+export const TRACKED_PLATFORMS: PlatformKey[] = ['ajio', 'myntra', 'snapdeal', 'meesho']
 
 // Narrows a full-platform key to one the master-data sync jobs cover. The Last
 // Sync column and every sync button are only meaningful for these four —
 // /trigger-master-sync rejects the rest.
-const isSyncable = (key: FilterPlatformKey): key is PlatformKey => TRACKED_PLATFORMS.includes(key as PlatformKey)
+export const isSyncable = (key: FilterPlatformKey): key is PlatformKey => TRACKED_PLATFORMS.includes(key as PlatformKey)
 
 // ── Local browser agent ──────────────────────────────────────────────────
 // "Open account" hands the credential to a helper process running on the
@@ -121,11 +127,11 @@ const isSyncable = (key: FilterPlatformKey): key is PlatformKey => TRACKED_PLATF
 // port 4001 — no CORS allowlist, no Private Network Access preflight. Override
 // with the agent's own URL if the Monitor is ever served from a shared host,
 // where the browser must reach each operator's local agent directly.
-const AGENT_URL = process.env.NEXT_PUBLIC_LOCAL_AGENT_URL || '/api/agent'
+export const AGENT_URL = process.env.NEXT_PUBLIC_LOCAL_AGENT_URL || '/api/agent'
 
 // Platforms the agent carries a login flow for. Kept in step with
 // agent/logins/index.js — a key missing here just disables the button.
-const AGENT_PLATFORMS = new Set<FilterPlatformKey>([
+export const AGENT_PLATFORMS = new Set<FilterPlatformKey>([
   'myntra',
   'ajio',
   'snapdeal',
@@ -136,7 +142,7 @@ const AGENT_PLATFORMS = new Set<FilterPlatformKey>([
   'xbees'
 ])
 
-const openAccountHint = (agentReady: boolean | null, platform: FilterPlatformKey, account: CredentialSync) => {
+export const openAccountHint = (agentReady: boolean | null, platform: FilterPlatformKey, account: CredentialSync) => {
   if (agentReady === null) return 'Checking for the local agent…'
   if (!agentReady) return 'Local browser agent not running — run "cd agent && npm install", then restart "pnpm dev"'
   if (!AGENT_PLATFORMS.has(platform)) return 'No login flow for this platform yet'
@@ -218,7 +224,7 @@ const rollUpLastSync = (credentials: PlatformCredentials[]): CompanyRow['lastSyn
   return out
 }
 
-const mapUserToRow = (u: any): CompanyRow => {
+export const mapUserToRow = (u: any): CompanyRow => {
   const credentials = pickCredentials(u?.company?.settings?.eCommercePlatformLoginInfo)
 
   return {
@@ -233,7 +239,7 @@ const mapUserToRow = (u: any): CompanyRow => {
   }
 }
 
-const formatSyncDate = (iso: string) => {
+export const formatSyncDate = (iso: string) => {
   if (!iso) return '—'
   const d = new Date(iso)
 
@@ -309,7 +315,7 @@ type Props = {
 // own last-sync timestamp. Grouped by platform; platforms with no credentials
 // are shown as empty rather than hidden, so ops can tell "not configured" apart
 // from "configured but never synced".
-const CredentialSyncPanel = ({
+export const CredentialSyncPanel = ({
   credentials,
   companyId,
   inFlight,
@@ -525,11 +531,16 @@ const CredentialSyncPanel = ({
 const columnHelper = createColumnHelper<CompanyRow>()
 
 const CompanyList = ({ impersonateBaseUrl }: Props) => {
+  const router = useRouter()
+  // Routes here keep the [lang] segment the app is mounted under.
+  const { lang: locale } = useParams()
+
   const [rows, setRows] = useState<CompanyRow[]>([])
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(0)
   const [pageSize, setPageSize] = useState(10)
-  const [search, setSearch] = useState('')
+  // Survives navigation (open a company, come back) — see usePersistedSearch.
+  const [search, setSearch] = usePersistedSearch('trackvid-monitor.company-list.search')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -1228,6 +1239,16 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
         enableSorting: false,
         cell: ({ row }) => (
           <div className='flex items-center'>
+            <Tooltip title='View company details'>
+              <span>
+                <IconButton
+                  disabled={!row.original.companyId}
+                  onClick={() => router.push(`/${locale}/apps/company/view/${row.original.companyId}`)}
+                >
+                  <i className='tabler-eye text-textSecondary' />
+                </IconButton>
+              </span>
+            </Tooltip>
             <Tooltip title='Open in TrackVid'>
               <span>
                 <IconButton

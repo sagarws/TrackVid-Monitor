@@ -31,6 +31,7 @@ import type { ColumnDef } from '@tanstack/react-table'
 
 // Hook Imports
 import useElementWidth from '@/hooks/useElementWidth'
+import usePersistedSearch from '@/hooks/usePersistedSearch'
 
 // Config Imports
 import { PLATFORMS } from '@/configs/platforms'
@@ -687,7 +688,8 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   // the platform cannot have its claims dispatched at all, so those rows are
   // noise on first load and are opted into rather than out of.
   const account = useAccountFilter({ initial: ['nonZero'], onChange: () => setPage(0) })
-  const [search, setSearch] = useState('')
+  // Survives navigation — see usePersistedSearch.
+  const [search, setSearch] = usePersistedSearch('trackvid-monitor.cms-pending.search')
   const [debouncedSearch, setDebouncedSearch] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
