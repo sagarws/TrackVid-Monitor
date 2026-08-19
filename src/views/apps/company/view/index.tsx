@@ -19,8 +19,10 @@ import DialogActions from '@mui/material/DialogActions'
 import DialogContent from '@mui/material/DialogContent'
 import DialogTitle from '@mui/material/DialogTitle'
 import Divider from '@mui/material/Divider'
+import FormControlLabel from '@mui/material/FormControlLabel'
 import Grid from '@mui/material/Grid'
 import Snackbar from '@mui/material/Snackbar'
+import Switch from '@mui/material/Switch'
 import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
 
@@ -131,6 +133,20 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
   const [mailboxes, setMailboxes] = useState<Mailbox[]>([])
   const [mailboxesLoading, setMailboxesLoading] = useState(true)
   const [mailboxesError, setMailboxesError] = useState<string | null>(null)
+
+  // Integration access — server truth for this company's map + the ordered
+  // list of valid keys the BE knows about (drives the toggle rendering, so
+  // adding a key in TrackVid-BE surfaces here without a Monitor deploy).
+  // `access` is the *last-saved* state; per-key dirty flags come from
+  // comparing the switch state against this baseline, so a save shows the
+  // diff cleanly.
+  const [integrationAccess, setIntegrationAccess] = useState<Record<string, boolean>>({})
+  const [integrationKeys, setIntegrationKeys] = useState<string[]>([])
+  const [integrationLoading, setIntegrationLoading] = useState(true)
+  const [integrationError, setIntegrationError] = useState<string | null>(null)
+  // Per-key busy set so each Switch spins independently — a bulk write of
+  // "email + ajio" holds both, a "myntra"-only write only holds myntra.
+  const [integrationBusy, setIntegrationBusy] = useState<Set<string>>(new Set())
   // Keyed `${mailboxId}:${action}` so the two buttons on one row spin
   // independently.
   const [mailboxBusy, setMailboxBusy] = useState<Set<string>>(new Set())
@@ -218,6 +234,102 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
     fetchMailboxes()
   }, [fetchMailboxes])
 
+  const fetchIntegrationAccess = useCallback(async () => {
+    setIntegrationLoading(true)
+    setIntegrationError(null)
+
+    try {
+      const res = await fetch(`/api/company/integration-access?companyId=${encodeURIComponent(companyId)}`, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        cache: 'no-store'
+      })
+
+      const json = await res.json().catch(() => null)
+
+      if (!res.ok || !json?.isSuccess) {
+        setIntegrationError(json?.displayMessage || json?.message || `Request failed (${res.status})`)
+
+        return
+      }
+
+      const map = (json?.data?.integrationAccess ?? {}) as Record<string, boolean>
+      const keys = Array.isArray(json?.data?.validKeys) ? (json.data.validKeys as string[]) : Object.keys(map)
+
+      // Backfill any BE-declared key the map missed so the render always sees
+      // every switch, and mirror the BE-declared ordering so the layout is
+      // stable across companies.
+      const normalized: Record<string, boolean> = {}
+
+      for (const key of keys) normalized[key] = map[key] === true
+
+      setIntegrationAccess(normalized)
+      setIntegrationKeys(keys)
+    } catch (err: any) {
+      setIntegrationError(err?.message || 'Failed to load integration access')
+    } finally {
+      setIntegrationLoading(false)
+    }
+  }, [companyId])
+
+  useEffect(() => {
+    fetchIntegrationAccess()
+  }, [fetchIntegrationAccess])
+
+  // Toggle one key. Optimistic + rollback-on-error: the switch flips
+  // immediately, and only reverts if the write fails. Same-company single-
+  // key writes are the common case, so we send a minimal `access` diff
+  // instead of the full map.
+  const toggleIntegrationKey = useCallback(
+    async (key: string, next: boolean) => {
+      if (integrationBusy.has(key)) return
+
+      const previous = integrationAccess[key] === true
+
+      // Optimistic update.
+      setIntegrationAccess(prev => ({ ...prev, [key]: next }))
+      setIntegrationBusy(prev => new Set(prev).add(key))
+
+      try {
+        const res = await fetch('/api/company/integration-access', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ companyIds: [companyId], access: { [key]: next } })
+        })
+
+        const json = await res.json().catch(() => null)
+
+        if (!res.ok || !json?.isSuccess) {
+          // Roll back on failure so the switch state matches server truth.
+          setIntegrationAccess(prev => ({ ...prev, [key]: previous }))
+          setToast({
+            severity: 'error',
+            message: json?.displayMessage || json?.message || `Update failed (${res.status})`
+          })
+
+          return
+        }
+
+        setToast({
+          severity: 'success',
+          message: `${key}: ${next ? 'enabled' : 'disabled'}`
+        })
+      } catch (err: any) {
+        setIntegrationAccess(prev => ({ ...prev, [key]: previous }))
+        setToast({ severity: 'error', message: err?.message || 'Update failed' })
+      } finally {
+        setIntegrationBusy(prev => {
+          const nextSet = new Set(prev)
+
+          nextSet.delete(key)
+
+          return nextSet
+        })
+      }
+    },
+    [companyId, integrationAccess, integrationBusy]
+  )
+
   const runMailboxAction = useCallback(
     async (mailbox: Mailbox, action: 'set-last-sync' | 'restart', lastSyncedAt?: Date | null) => {
       const key = `${mailbox.id}:${action}`
@@ -238,6 +350,18 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
         })
 
         const json = await res.json().catch(() => null)
+
+        // 409 = the BE refused because nothing is consuming mailbox-fetch.
+        // Surfaced as a warning with the fix rather than a red failure: the
+        // request was correct, the environment is not ready for it.
+        if (res.status === 409) {
+          setToast({
+            severity: 'warning',
+            message: json?.displayMessage || 'No worker is consuming mailbox-fetch — start the Email-Automation process'
+          })
+
+          return
+        }
 
         if (!res.ok || !json?.isSuccess) {
           setToast({
@@ -606,6 +730,73 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
                     )
                   })}
                 </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader
+              title='Integration Access'
+              subheader='Toggle which integrations this company can see on /integrations'
+              action={
+                <Button
+                  size='small'
+                  variant='outlined'
+                  color='secondary'
+                  startIcon={<i className='tabler-refresh' />}
+                  disabled={integrationLoading}
+                  onClick={fetchIntegrationAccess}
+                >
+                  Refresh
+                </Button>
+              }
+            />
+            <Divider />
+            <CardContent>
+              {integrationError && (
+                <Alert severity='error' className='mbe-4'>
+                  {integrationError}
+                </Alert>
+              )}
+              {integrationLoading ? (
+                <div className='flex justify-center py-6'>
+                  <CircularProgress size={22} />
+                </div>
+              ) : integrationKeys.length === 0 ? (
+                <Typography color='text.disabled'>No integrations configured on the server.</Typography>
+              ) : (
+                // One switch per BE-declared key. Optimistic toggle writes to
+                // the same bulk endpoint the CLI would call, so nothing else
+                // needs to know about this page.
+                <Grid container spacing={3}>
+                  {integrationKeys.map(key => {
+                    const enabled = integrationAccess[key] === true
+                    const busy = integrationBusy.has(key)
+
+                    return (
+                      <Grid key={key} size={{ xs: 12, sm: 6, md: 4, lg: 3 }}>
+                        <div className='flex items-center justify-between gap-2 rounded border plb-2 pli-3'>
+                          <FormControlLabel
+                            control={
+                              <Switch
+                                checked={enabled}
+                                disabled={busy}
+                                onChange={e => toggleIntegrationKey(key, e.target.checked)}
+                              />
+                            }
+                            label={
+                              <Typography color='text.primary' className='capitalize'>
+                                {key}
+                              </Typography>
+                            }
+                            sx={{ m: 0 }}
+                          />
+                          {busy && <CircularProgress size={14} />}
+                        </div>
+                      </Grid>
+                    )
+                  })}
+                </Grid>
               )}
             </CardContent>
           </Card>
