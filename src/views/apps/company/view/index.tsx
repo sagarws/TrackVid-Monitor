@@ -14,14 +14,24 @@ import CardContent from '@mui/material/CardContent'
 import CardHeader from '@mui/material/CardHeader'
 import Chip from '@mui/material/Chip'
 import CircularProgress from '@mui/material/CircularProgress'
+import Dialog from '@mui/material/Dialog'
+import DialogActions from '@mui/material/DialogActions'
+import DialogContent from '@mui/material/DialogContent'
+import DialogTitle from '@mui/material/DialogTitle'
 import Divider from '@mui/material/Divider'
 import Grid from '@mui/material/Grid'
 import Snackbar from '@mui/material/Snackbar'
+import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
 
 // Component Imports
 import CopyButton from '@/components/CopyButton'
 import CopyableId from '@/components/CopyableId'
+import CustomTextField from '@core/components/mui/TextField'
+
+// Styled Component Imports — the template's react-datepicker wrapper, so the
+// calendar matches every other date field in the app.
+import AppReactDatepicker from '@/libs/styles/AppReactDatepicker'
 
 // View Imports — the list owns the row shape and the credential panel; this
 // page renders the same data for one company rather than restating it.
@@ -43,6 +53,52 @@ type Props = {
 }
 
 type Toast = { severity: 'success' | 'error' | 'warning' | 'info'; message: string }
+
+// One connected mailbox, as /system-admin/company/mailboxes reports it.
+type Mailbox = {
+  id: string
+  email: string
+  displayName: string
+  provider: string
+  type?: string
+  status: string
+  statusChangedBy: string | null
+  ownerEmail: string | null
+  lastSyncedAt: string | null
+  lastProcessedAt: string | null
+  needsSync: boolean
+  // A lease left behind by a worker that died — the usual reason a mailbox
+  // quietly stops polling, and what Restart clears.
+  occupiedAt: string | null
+  occupiedBy: string | null
+  watchError: Record<string, unknown> | null
+}
+
+const mailboxStatusColor = (status: string): 'success' | 'error' | 'warning' | 'default' => {
+  const s = (status || '').toLowerCase()
+
+  if (s === 'connected') return 'success'
+  if (s === 'token_expired') return 'warning'
+  if (s === 'error') return 'error'
+
+  return 'default'
+}
+
+// "40 minutes ago" — the only form of a sync time anyone reads at a glance.
+const relativeTime = (iso: string | null) => {
+  if (!iso) return 'never'
+  const ms = new Date(iso).getTime()
+
+  if (Number.isNaN(ms)) return 'unknown'
+
+  const mins = Math.round((Date.now() - ms) / 60000)
+
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  if (mins < 1440) return `${Math.floor(mins / 60)}h ${mins % 60}m ago`
+
+  return `${Math.floor(mins / 1440)}d ago`
+}
 
 // A labelled value with an optional copy button. The detail page is mostly
 // these, so they are one component rather than a repeated flex row.
@@ -71,6 +127,19 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
   const [inFlight, setInFlight] = useState<Set<string>>(new Set())
   const [agentReady, setAgentReady] = useState<boolean | null>(null)
   const [opening, setOpening] = useState<Set<string>>(new Set())
+
+  const [mailboxes, setMailboxes] = useState<Mailbox[]>([])
+  const [mailboxesLoading, setMailboxesLoading] = useState(true)
+  const [mailboxesError, setMailboxesError] = useState<string | null>(null)
+  // Keyed `${mailboxId}:${action}` so the two buttons on one row spin
+  // independently.
+  const [mailboxBusy, setMailboxBusy] = useState<Set<string>>(new Set())
+
+  // Mailbox whose sync-time picker is open, and the date chosen in it. The
+  // timestamp is what the poller reads mail forward from, so it is picked
+  // rather than assumed — "now" is only one of the useful answers.
+  const [syncTimeMailbox, setSyncTimeMailbox] = useState<Mailbox | null>(null)
+  const [syncTimeValue, setSyncTimeValue] = useState<Date | null>(null)
 
   // Same endpoint the list uses, narrowed to one company by the companyIds
   // filter — no second read path to keep in step with it.
@@ -115,6 +184,98 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
   useEffect(() => {
     fetchCompany()
   }, [fetchCompany])
+
+  const fetchMailboxes = useCallback(async () => {
+    setMailboxesLoading(true)
+    setMailboxesError(null)
+
+    try {
+      const res = await fetch('/api/company/mailboxes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyId })
+      })
+
+      const json = await res.json().catch(() => null)
+
+      if (!res.ok || !json?.isSuccess) {
+        setMailboxes([])
+        setMailboxesError(json?.displayMessage || json?.message || `Request failed (${res.status})`)
+
+        return
+      }
+
+      setMailboxes(Array.isArray(json?.data?.mailboxes) ? json.data.mailboxes : [])
+    } catch (err: any) {
+      setMailboxes([])
+      setMailboxesError(err?.message || 'Failed to load mailboxes')
+    } finally {
+      setMailboxesLoading(false)
+    }
+  }, [companyId])
+
+  useEffect(() => {
+    fetchMailboxes()
+  }, [fetchMailboxes])
+
+  const runMailboxAction = useCallback(
+    async (mailbox: Mailbox, action: 'set-last-sync' | 'restart', lastSyncedAt?: Date | null) => {
+      const key = `${mailbox.id}:${action}`
+
+      setMailboxBusy(prev => new Set(prev).add(key))
+
+      try {
+        const res = await fetch('/api/company/mailbox-sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mailboxIds: [mailbox.id],
+            action,
+            // Omitted means "now" server-side; sent as an ISO instant so the
+            // BE stores the exact moment picked, not a re-parsed local string.
+            ...(lastSyncedAt ? { lastSyncedAt: lastSyncedAt.toISOString() } : {})
+          })
+        })
+
+        const json = await res.json().catch(() => null)
+
+        if (!res.ok || !json?.isSuccess) {
+          setToast({
+            severity: 'error',
+            message: json?.displayMessage || json?.message || `Request failed (${res.status})`
+          })
+
+          return
+        }
+
+        // "Restarted, 0 queued" is a real outcome — a disconnected mailbox is
+        // skipped by the queue — so it is reported rather than dressed up as
+        // success.
+        const queued = json.data?.queued
+
+        setToast({
+          severity: action === 'restart' && queued === 0 ? 'warning' : 'success',
+          message:
+            action === 'restart' && queued === 0
+              ? 'Lease cleared, but no job was queued — the mailbox is not connected'
+              : json.displayMessage || json.message || 'Done'
+        })
+
+        fetchMailboxes()
+      } catch (err: any) {
+        setToast({ severity: 'error', message: err?.message || 'Request failed' })
+      } finally {
+        setMailboxBusy(prev => {
+          const next = new Set(prev)
+
+          next.delete(key)
+
+          return next
+        })
+      }
+    },
+    [fetchMailboxes]
+  )
 
   useEffect(() => {
     const controller = new AbortController()
@@ -311,6 +472,145 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
           </Card>
 
           <Card>
+            <CardHeader
+              title='Connected Mailboxes'
+              subheader='Inboxes this company&apos;s email automation reads from'
+              action={
+                <Button
+                  size='small'
+                  variant='outlined'
+                  color='secondary'
+                  startIcon={<i className='tabler-refresh' />}
+                  disabled={mailboxesLoading}
+                  onClick={fetchMailboxes}
+                >
+                  Refresh
+                </Button>
+              }
+            />
+            <Divider />
+            <CardContent>
+              {mailboxesError && (
+                <Alert severity='error' className='mbe-4'>
+                  {mailboxesError}
+                </Alert>
+              )}
+              {mailboxesLoading ? (
+                <div className='flex justify-center py-6'>
+                  <CircularProgress size={22} />
+                </div>
+              ) : mailboxes.length === 0 ? (
+                <Typography color='text.disabled'>No mailboxes connected for this company.</Typography>
+              ) : (
+                <div className='flex flex-col gap-3'>
+                  {mailboxes.map(mailbox => {
+                    const stampBusy = mailboxBusy.has(`${mailbox.id}:set-last-sync`)
+                    const restartBusy = mailboxBusy.has(`${mailbox.id}:restart`)
+
+                    return (
+                      <div
+                        key={mailbox.id}
+                        className='flex items-center justify-between gap-4 flex-wrap rounded border plb-3 pli-4'
+                      >
+                        <div className='flex items-start gap-3 min-is-0'>
+                          <i className='tabler-mail text-xl text-textSecondary mbs-1' />
+                          <div className='flex flex-col gap-1 min-is-0'>
+                            <div className='flex items-center gap-2 flex-wrap'>
+                              <Typography color='text.primary' className='font-medium break-all'>
+                                {mailbox.displayName}
+                              </Typography>
+                              <Chip
+                                size='small'
+                                variant='tonal'
+                                color={mailboxStatusColor(mailbox.status)}
+                                label={mailbox.status}
+                              />
+                              <Chip size='small' variant='tonal' label={mailbox.provider} />
+                              {/* A held lease is why a "connected" mailbox can
+                                  still be silently stuck — surfaced, because it
+                                  is the thing Restart fixes. */}
+                              {mailbox.occupiedAt && (
+                                <Tooltip
+                                  title={`Held by ${mailbox.occupiedBy || 'a worker'} since ${new Date(
+                                    mailbox.occupiedAt
+                                  ).toLocaleString('en-IN')} — Restart releases it`}
+                                >
+                                  <Chip size='small' variant='tonal' color='warning' label='Lease held' />
+                                </Tooltip>
+                              )}
+                              {mailbox.needsSync && <Chip size='small' variant='tonal' color='info' label='Sync queued' />}
+                            </div>
+                            <div className='flex items-center gap-1 flex-wrap'>
+                              <Typography variant='caption' color='text.secondary' className='break-all'>
+                                {mailbox.email}
+                              </Typography>
+                              <CopyButton value={mailbox.email} label='mailbox address' />
+                              <Tooltip
+                                title={
+                                  mailbox.lastSyncedAt
+                                    ? new Date(mailbox.lastSyncedAt).toLocaleString('en-IN')
+                                    : 'This mailbox has never completed a sync'
+                                }
+                              >
+                                <Typography variant='caption' color='text.secondary'>
+                                  · Synced {relativeTime(mailbox.lastSyncedAt)}
+                                </Typography>
+                              </Tooltip>
+                            </div>
+                          </div>
+                        </div>
+                        <div className='flex items-center gap-2'>
+                          <Tooltip title='Pick the point the poller should read mail forward from'>
+                            <span>
+                              <Button
+                                size='small'
+                                variant='outlined'
+                                color='secondary'
+                                disabled={stampBusy || restartBusy}
+                                startIcon={
+                                  stampBusy ? <CircularProgress size={14} /> : <i className='tabler-calendar-clock' />
+                                }
+                                onClick={() => {
+                                  setSyncTimeMailbox(mailbox)
+                                  // Seeded with the current value so the dialog
+                                  // opens on the date being changed, not today.
+                                  setSyncTimeValue(mailbox.lastSyncedAt ? new Date(mailbox.lastSyncedAt) : new Date())
+                                }}
+                              >
+                                Update sync time
+                              </Button>
+                            </span>
+                          </Tooltip>
+                          <Tooltip title='Release a stuck lease, clear the watch error and re-queue the fetch job'>
+                            <span>
+                              <Button
+                                size='small'
+                                variant='tonal'
+                                color='primary'
+                                disabled={stampBusy || restartBusy}
+                                startIcon={
+                                  restartBusy ? (
+                                    <CircularProgress size={14} color='inherit' />
+                                  ) : (
+                                    <i className='tabler-player-play' />
+                                  )
+                                }
+                                onClick={() => runMailboxAction(mailbox, 'restart')}
+                              >
+                                Restart job
+                              </Button>
+                            </span>
+                          </Tooltip>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+
+          <Card>
             <CardHeader title='Credentials' subheader='Every marketplace login configured for this company' />
             <Divider />
             {/* The same panel the list expands, with the same actions — a
@@ -327,6 +627,83 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
           </Card>
         </>
       ) : null}
+
+      <Dialog
+        open={Boolean(syncTimeMailbox)}
+        onClose={() => setSyncTimeMailbox(null)}
+        maxWidth='xs'
+        fullWidth
+        // react-datepicker renders its calendar in a portal; without this the
+        // popup lands behind the dialog surface.
+        sx={{ '& .react-datepicker-popper': { zIndex: 1400 } }}
+      >
+        <DialogTitle>Update sync time</DialogTitle>
+        <DialogContent>
+          <div className='flex flex-col gap-4 pbs-2'>
+            <Typography variant='body2'>
+              Set the point <strong>{syncTimeMailbox?.email}</strong> reads mail forward from. Anything older than this
+              is skipped; moving it back makes the poller re-read that window.
+            </Typography>
+            <AppReactDatepicker
+              selected={syncTimeValue}
+              onChange={(date: Date | null) => setSyncTimeValue(date)}
+              showTimeSelect
+              timeIntervals={15}
+              dateFormat='dd MMM yyyy, h:mm aa'
+              // A future timestamp would silently mute the mailbox until that
+              // moment passed, which looks identical to a broken poller.
+              maxDate={new Date()}
+              customInput={<CustomTextField fullWidth label='Last synced at' />}
+            />
+            <div className='flex items-center gap-2 flex-wrap'>
+              <Button size='small' variant='tonal' color='secondary' onClick={() => setSyncTimeValue(new Date())}>
+                Now
+              </Button>
+              <Button
+                size='small'
+                variant='tonal'
+                color='secondary'
+                onClick={() => setSyncTimeValue(new Date(Date.now() - 24 * 60 * 60 * 1000))}
+              >
+                24 hours ago
+              </Button>
+              <Button
+                size='small'
+                variant='tonal'
+                color='secondary'
+                onClick={() => setSyncTimeValue(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000))}
+              >
+                7 days ago
+              </Button>
+            </div>
+            <Typography variant='caption' color='text.secondary'>
+              Currently{' '}
+              {syncTimeMailbox?.lastSyncedAt
+                ? new Date(syncTimeMailbox.lastSyncedAt).toLocaleString('en-IN')
+                : 'never synced'}
+              .
+            </Typography>
+          </div>
+        </DialogContent>
+        <DialogActions>
+          <Button color='secondary' onClick={() => setSyncTimeMailbox(null)}>
+            Cancel
+          </Button>
+          <Button
+            variant='contained'
+            disabled={!syncTimeValue || mailboxBusy.has(`${syncTimeMailbox?.id}:set-last-sync`)}
+            onClick={async () => {
+              if (!syncTimeMailbox || !syncTimeValue) return
+              const target = syncTimeMailbox
+
+              setSyncTimeMailbox(null)
+              await runMailboxAction(target, 'set-last-sync', syncTimeValue)
+            }}
+          >
+            Update
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Snackbar
         open={Boolean(toast)}
