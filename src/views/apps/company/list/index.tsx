@@ -654,7 +654,16 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
         return
       }
 
-      setToast({ severity: 'success', message: `${acc.username} is open (${json.method})` })
+      // A challenged login is NOT a finished one — the window is open on the
+      // OTP modal and needs six digits typed into it.
+      setToast(
+        json.awaiting === 'otp'
+          ? {
+              severity: 'warning',
+              message: `${acc.username}: the portal is asking for an OTP — enter it in the browser window`
+            }
+          : { severity: 'success', message: `${acc.username} is open (${json.method})` }
+      )
     } catch (err: any) {
       setAgentReady(false)
       setToast({

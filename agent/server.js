@@ -22,6 +22,10 @@
 // panel. Nothing is written to disk except Chrome's own profile.
 // -----------------------------------------------------------------------------
 
+// Loads GMAIL_IMAP_USER / GMAIL_IMAP_PASSWORD when present, for Flipkart's OTP
+// auto-fill. Absent is fine — that path degrades to "type the code by hand".
+require('dotenv').config()
+
 const express = require('express')
 const cors = require('cors')
 const os = require('os')
@@ -125,13 +129,27 @@ app.post('/open', async (req, res) => {
     const elapsedMs = Date.now() - startedAt
     const url = page.url()
 
-    console.log(`✅ [open] ${target.label} / ${username} ready in ${elapsedMs}ms via ${result.method} → ${url}`)
+    if (result.awaiting) {
+      console.log(`⏸  [open] ${target.label} / ${username} is waiting on ${result.awaiting} — window left open`)
+    } else {
+      console.log(`✅ [open] ${target.label} / ${username} ready in ${elapsedMs}ms via ${result.method} → ${url}`)
+    }
 
     // Hand the browser over. disconnect() drops the DevTools connection without
     // terminating Chrome, so the operator keeps a normal window.
     browser.disconnect()
 
-    return res.json({ ok: true, platform: target.key, username, method: result.method, url, elapsedMs })
+    return res.json({
+      ok: true,
+      platform: target.key,
+      username,
+      method: result.method,
+      // 'otp' when the portal challenged and no code could be filled — the
+      // window is open and logged-in-pending, which is not the same as done.
+      awaiting: result.awaiting ?? null,
+      url,
+      elapsedMs
+    })
   } catch (err) {
     const elapsedMs = Date.now() - startedAt
 

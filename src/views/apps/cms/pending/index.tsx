@@ -70,7 +70,11 @@ export type MyntraSession = {
   expiresAt: string | null
   ip: string | null
   source: string | null
-  hasProxySession: boolean
+  // Myntra records whether a Bright Data proxy session minted the jar; Flipkart
+  // records whether the fk-csrf-token that signs its API calls is present. Each
+  // platform sets only its own flag.
+  hasProxySession?: boolean
+  hasCsrfToken?: boolean
   cookieNames: string[]
 }
 
@@ -83,6 +87,7 @@ export type PlatformCredential = {
   isVerified: boolean
   visible: boolean
   myntraSession: MyntraSession | null
+  flipkartSession: MyntraSession | null
 }
 
 export type PendingCompanyRow = {
@@ -128,6 +133,37 @@ const SCRIPT_STATUSES = [
 // Sentinel for "the field is missing or null", which the BE accepts as
 // currentStatus but cannot be expressed as a Select value.
 const NO_STATUS = '__no_status__'
+
+// CMS_STATUS — the claim's own lifecycle status, not the runner's. Used by the
+// "Clear Account" filter, which rewrites historical rows and so has to say
+// exactly which ones.
+const CLAIM_STATUSES = [
+  'Pending',
+  'In Review',
+  'Un Attended',
+  'In Progress',
+  'Customer Replied',
+  'Approved',
+  'Rejected',
+  'Resolved',
+  'Awaiting Seller Response',
+  'Awaiting Agent Response',
+  'Paid',
+  'Failed to Proceed'
+] as const
+
+// Which field the clear touches, per platform. Mirrors
+// USERNAME_FIELD_BY_PLATFORM in the BE controller — shown in the dialog so the
+// operator can see what is about to be unset rather than trusting the label.
+const ACCOUNT_FIELD_BY_PLATFORM: Record<string, string> = {
+  ajio: 'ajio_account_email',
+  meesho: 'meesho_account_email',
+  snapdeal: 'snapdeal_account_username',
+  myntra: 'myntraClaimDetails.username',
+  nykaa: 'nykaaClaimDetails.username'
+}
+
+const accountFieldFor = (platform: string) => ACCOUNT_FIELD_BY_PLATFORM[platform] || 'otherClaimDetails.username'
 
 // Statuses the BE refuses to re-dispatch (RUNNING / SUCCESS / QUEUED). Such
 // claims stay selectable — "Change Status" exists precisely to un-stick them —
@@ -189,6 +225,19 @@ type StatusChangeResponse = {
   } | null
 }
 
+type ClearAccountResponse = {
+  isSuccess: boolean
+  displayMessage?: string
+  message?: string
+  data?: {
+    field?: string
+    matched?: number
+    modified?: number
+    dryRun?: boolean
+    filter?: { platform?: string; statuses?: string[]; scriptProcessingStatus?: string | null }
+  } | null
+}
+
 type Toast = { severity: 'success' | 'error' | 'warning' | 'info'; message: string }
 
 // A claim is selected by id; its company is carried along so the confirm dialog
@@ -239,6 +288,16 @@ const mapCompanyToRow = (c: any): PendingCompanyRow => ({
             source: cred.myntraSession.source ?? null,
             hasProxySession: Boolean(cred.myntraSession.hasProxySession),
             cookieNames: Array.isArray(cred.myntraSession.cookieNames) ? cred.myntraSession.cookieNames : []
+          }
+        : null,
+      flipkartSession: cred?.flipkartSession
+        ? {
+            savedAt: cred.flipkartSession.savedAt ?? null,
+            expiresAt: cred.flipkartSession.expiresAt ?? null,
+            ip: cred.flipkartSession.ip ?? null,
+            source: cred.flipkartSession.source ?? null,
+            hasCsrfToken: Boolean(cred.flipkartSession.hasCsrfToken),
+            cookieNames: Array.isArray(cred.flipkartSession.cookieNames) ? cred.flipkartSession.cookieNames : []
           }
         : null
     })
@@ -327,6 +386,13 @@ const CredentialsPanel = ({
   onRenewSession: (credential: PlatformCredential) => void
 }) => {
   const isMyntra = platform === 'myntra'
+  const isFlipkart = platform === 'flipkart'
+
+  // Both platforms cache a session per credential and can renew it on demand;
+  // every other platform logs in fresh each run and has nothing to show here.
+  const supportsSession = isMyntra || isFlipkart
+  const sessionLabel = isFlipkart ? 'Flipkart session' : 'Myntra session'
+  const sessionFor = (cred: PlatformCredential) => (isFlipkart ? cred.flipkartSession : cred.myntraSession)
 
   return (
     <div className='overflow-auto rounded border mbe-4'>
@@ -337,14 +403,14 @@ const CredentialsPanel = ({
             <th className='is-[140px]'>Type</th>
             <th className='is-[160px]'>Vendor code</th>
             <th className='is-[140px]'>Verified</th>
-            {isMyntra && <th className='is-[280px]'>Myntra session</th>}
-            {isMyntra && <th className='is-[90px] text-center'>View</th>}
+            {supportsSession && <th className='is-[280px]'>{sessionLabel}</th>}
+            {supportsSession && <th className='is-[90px] text-center'>View</th>}
           </tr>
         </thead>
         <tbody>
           {credentials.length === 0 ? (
             <tr>
-              <td colSpan={isMyntra ? 6 : 4}>
+              <td colSpan={supportsSession ? 6 : 4}>
                 <Typography variant='body2' color='text.disabled'>
                   No accounts configured on this platform — the claims below cannot be dispatched
                 </Typography>
@@ -352,7 +418,8 @@ const CredentialsPanel = ({
             </tr>
           ) : (
             credentials.map((cred, i) => {
-              const state = sessionState(cred.myntraSession)
+              const session = sessionFor(cred)
+              const state = sessionState(session)
               const busy = renewing.has(cred.credentialId)
 
               return (
@@ -384,15 +451,13 @@ const CredentialsPanel = ({
                       </Tooltip>
                     )}
                   </td>
-                  {isMyntra && (
+                  {supportsSession && (
                     <td>
                       <div className='flex items-center gap-2'>
                         <Tooltip
                           title={
-                            cred.myntraSession?.expiresAt
-                              ? `Expires ${formatInstant(cred.myntraSession.expiresAt)} (${relativeToNow(
-                                  cred.myntraSession.expiresAt
-                                )})`
+                            session?.expiresAt
+                              ? `Expires ${formatInstant(session.expiresAt)} (${relativeToNow(session.expiresAt)})`
                               : 'No cookie jar stored for this account'
                           }
                         >
@@ -401,8 +466,10 @@ const CredentialsPanel = ({
                         <Tooltip
                           title={
                             busy
-                              ? 'Logging in to Myntra — this takes up to a minute'
-                              : 'Run a fresh Myntra login and store the new cookie jar'
+                              ? isFlipkart
+                                ? 'Logging in to Flipkart — the OTP mail can take a couple of minutes'
+                                : 'Logging in to Myntra — this takes up to a minute'
+                              : `Run a fresh ${isFlipkart ? 'Flipkart' : 'Myntra'} login and store the new session`
                           }
                         >
                           <span>
@@ -423,15 +490,11 @@ const CredentialsPanel = ({
                       </div>
                     </td>
                   )}
-                  {isMyntra && (
+                  {supportsSession && (
                     <td className='text-center'>
-                      <Tooltip title={cred.myntraSession ? 'View session details' : 'No session to view'}>
+                      <Tooltip title={session ? 'View session details' : 'No session to view'}>
                         <span>
-                          <IconButton
-                            size='small'
-                            disabled={!cred.myntraSession}
-                            onClick={() => onViewSession(cred)}
-                          >
+                          <IconButton size='small' disabled={!session} onClick={() => onViewSession(cred)}>
                             <i className='tabler-eye text-base' />
                           </IconButton>
                         </span>
@@ -637,6 +700,11 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   const [toast, setToast] = useState<Toast | null>(null)
   // Credential whose Myntra session is open in the modal; null = closed.
   const [sessionCredential, setSessionCredential] = useState<PlatformCredential | null>(null)
+
+  // Which stored session the eye-icon dialog is showing. Derived from the
+  // selected platform so one dialog serves both Myntra and Flipkart.
+  const viewedSession =
+    (platform === 'flipkart' ? sessionCredential?.flipkartSession : sessionCredential?.myntraSession) ?? null
   // credentialIds with a renewal in flight.
   const [renewing, setRenewing] = useState<Set<string>>(new Set())
 
@@ -649,6 +717,17 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   const [statusTo, setStatusTo] = useState<string>('Not Started')
   const [statusSubmitting, setStatusSubmitting] = useState(false)
   const [statusResult, setStatusResult] = useState<StatusChangeResponse | null>(null)
+
+  // ── Clear seller account off claims ─────────────────────────────────────
+  // Defaults to Pending only: this rewrites historical rows, so the wider
+  // statuses have to be chosen deliberately rather than inherited.
+  const [clearDialogOpen, setClearDialogOpen] = useState(false)
+  const [clearStatuses, setClearStatuses] = useState<string[]>(['Pending'])
+  const [clearScriptStatus, setClearScriptStatus] = useState<string>('')
+  const [clearPreview, setClearPreview] = useState<number | null>(null)
+  const [clearPreviewing, setClearPreviewing] = useState(false)
+  const [clearSubmitting, setClearSubmitting] = useState(false)
+  const [clearResult, setClearResult] = useState<ClearAccountResponse | null>(null)
 
   // Measured width of the table's horizontal scroller, handed to the expanded
   // panel so it scrolls on its own instead of widening the company table.
@@ -843,11 +922,17 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
         return
       }
 
+      // The renew endpoint is per-platform: each one drives a different login
+      // flow on the automation box, and only these two cache a session at all.
+      const renewEndpoint =
+        platform === 'flipkart' ? '/api/cms/renew-flipkart-session' : '/api/cms/renew-myntra-session'
+      const platformName = platform === 'flipkart' ? 'Flipkart' : 'Myntra'
+
       setRenewing(prev => new Set(prev).add(credential.credentialId))
-      setToast({ severity: 'info', message: `Logging in to Myntra as ${credential.username}…` })
+      setToast({ severity: 'info', message: `Logging in to ${platformName} as ${credential.username}…` })
 
       try {
-        const res = await fetch('/api/cms/renew-myntra-session', {
+        const res = await fetch(renewEndpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ companyId: owner.companyId, credentialId: credential.credentialId })
@@ -874,7 +959,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
         })
 
         // Refetch rather than patching the row locally: the same jar can be
-        // shared by the same Myntra account under another company, and the
+        // shared by the same seller account under another company, and the
         // reload picks all of those up.
         fetchRows()
       } catch (err: any) {
@@ -1008,6 +1093,100 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
     if (statusSubmitting) return
     setStatusDialogOpen(false)
     setStatusResult(null)
+  }
+
+  // One call serves both the count preview and the write; `dryRun` decides.
+  const callClearAccount = useCallback(
+    async (dryRun: boolean) => {
+      const res = await fetch('/api/cms/clear-account-username', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          companyIds: selectedCompanies.map(c => c.companyId),
+          eCommercePlatform: platform,
+          statuses: clearStatuses,
+          ...(clearScriptStatus ? { scriptProcessingStatus: clearScriptStatus } : {}),
+          dryRun
+        })
+      })
+
+      const json = (await res.json().catch(() => null)) as ClearAccountResponse | null
+
+      return { res, json }
+    },
+    [selectedCompanies, platform, clearStatuses, clearScriptStatus]
+  )
+
+  // Counts what would be cleared, without changing anything. Re-run whenever
+  // the filter moves so the number on the button is always the number the
+  // button will act on.
+  const previewClearAccount = useCallback(async () => {
+    if (selectedCompanies.length === 0 || clearStatuses.length === 0) {
+      setClearPreview(0)
+
+      return
+    }
+
+    setClearPreviewing(true)
+
+    try {
+      const { res, json } = await callClearAccount(true)
+
+      setClearPreview(res.ok && json?.isSuccess ? json.data?.matched ?? 0 : null)
+    } catch {
+      setClearPreview(null)
+    } finally {
+      setClearPreviewing(false)
+    }
+  }, [callClearAccount, selectedCompanies.length, clearStatuses.length])
+
+  useEffect(() => {
+    if (!clearDialogOpen || clearResult) return
+    previewClearAccount()
+  }, [clearDialogOpen, clearResult, previewClearAccount])
+
+  const runClearAccount = async () => {
+    if (selectedCompanies.length === 0 || clearStatuses.length === 0) return
+
+    setClearSubmitting(true)
+
+    try {
+      const { res, json } = await callClearAccount(false)
+
+      if (!res.ok || !json?.isSuccess) {
+        setToast({
+          severity: 'error',
+          message: json?.displayMessage || json?.message || `Request failed (${res.status})`
+        })
+
+        return
+      }
+
+      const modified = json.data?.modified ?? 0
+
+      setClearResult(json)
+      setToast({
+        severity: modified > 0 ? 'success' : 'warning',
+        message:
+          modified > 0
+            ? `Cleared the account on ${modified.toLocaleString('en-IN')} claim(s)`
+            : 'No claims carried an account to clear'
+      })
+
+      // The Account column in the expanded panel is now stale.
+      fetchRows()
+    } catch (err: any) {
+      setToast({ severity: 'error', message: err?.message || 'Clear request failed' })
+    } finally {
+      setClearSubmitting(false)
+    }
+  }
+
+  const closeClearDialog = () => {
+    if (clearSubmitting) return
+    setClearDialogOpen(false)
+    setClearResult(null)
+    setClearPreview(null)
   }
 
   // Total pending claims across the companies on this page — the page-level
@@ -1315,6 +1494,19 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
               </Button>
             </span>
           </Tooltip>
+          <Tooltip title={`Remove the stored ${platformLabel} account from the selected companies' claims`}>
+            <span>
+              <Button
+                variant='outlined'
+                color='error'
+                startIcon={<i className='tabler-user-off' />}
+                disabled={selectedCompanies.length === 0}
+                onClick={() => setClearDialogOpen(true)}
+              >
+                Clear Account{selectedCompanies.length ? ` (${selectedCompanies.length})` : ''}
+              </Button>
+            </span>
+          </Tooltip>
           <Tooltip
             title={
               selectedIds.length > 0 && processableSelectedIds.length === 0
@@ -1583,6 +1775,125 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
         </DialogActions>
       </Dialog>
 
+      <Dialog open={clearDialogOpen} onClose={closeClearDialog} maxWidth='sm' fullWidth>
+        <DialogTitle>Clear Account</DialogTitle>
+        <DialogContent>
+          {clearResult ? (
+            <div className='flex flex-col gap-3'>
+              <Alert severity={(clearResult.data?.modified ?? 0) > 0 ? 'success' : 'info'}>
+                <AlertTitle>{clearResult.displayMessage || clearResult.message || 'Done'}</AlertTitle>
+                {(clearResult.data?.matched ?? 0).toLocaleString('en-IN')} claim(s) matched,{' '}
+                {(clearResult.data?.modified ?? 0).toLocaleString('en-IN')} cleared.
+              </Alert>
+              <Typography variant='body2' color='text.secondary'>
+                Field: <code>{clearResult.data?.field}</code> · statuses:{' '}
+                {(clearResult.data?.filter?.statuses ?? []).join(', ')}
+              </Typography>
+            </div>
+          ) : (
+            <div className='flex flex-col gap-4'>
+              <Typography variant='body2'>
+                Remove the stored seller account from <strong>{platformLabel}</strong> claims belonging to{' '}
+                <strong>{selectedCompanies.length}</strong> selected compan
+                {selectedCompanies.length === 1 ? 'y' : 'ies'}.
+              </Typography>
+              {/* The field differs per marketplace, so it is named rather than
+                  described — "the username" is not one thing in this schema. */}
+              <Typography variant='body2' color='text.secondary'>
+                Clears <code>{accountFieldFor(platform)}</code> on {platformLabel}.
+              </Typography>
+              <CustomTextField
+                select
+                label='Claim status'
+                value={clearStatuses}
+                onChange={e => setClearStatuses(e.target.value as unknown as string[])}
+                disabled={clearSubmitting}
+                slotProps={{
+                  select: {
+                    multiple: true,
+                    renderValue: (value: unknown) => (
+                      <div className='flex flex-wrap gap-1'>
+                        {(value as string[]).map(s => (
+                          <Chip key={s} size='small' variant='tonal' color='primary' label={s} />
+                        ))}
+                      </div>
+                    )
+                  }
+                }}
+                className='is-full'
+              >
+                {CLAIM_STATUSES.map(status => (
+                  <MenuItem key={status} value={status}>
+                    <Checkbox size='small' checked={clearStatuses.includes(status)} />
+                    {status}
+                  </MenuItem>
+                ))}
+              </CustomTextField>
+              <CustomTextField
+                select
+                label='Script status (optional)'
+                value={clearScriptStatus}
+                onChange={e => setClearScriptStatus(e.target.value)}
+                disabled={clearSubmitting}
+                className='is-full'
+              >
+                <MenuItem value=''>Any</MenuItem>
+                {SCRIPT_STATUSES.map(status => (
+                  <MenuItem key={status} value={status}>
+                    {status}
+                  </MenuItem>
+                ))}
+              </CustomTextField>
+              {/* Counted server-side before anything is written: the selection
+                  is company-level, so the number of CLAIMS affected is not
+                  visible from this page otherwise. */}
+              <Alert severity={clearPreview === 0 ? 'info' : 'warning'} icon={clearPreviewing ? false : undefined}>
+                {clearPreviewing ? (
+                  <span className='flex items-center gap-2'>
+                    <CircularProgress size={14} /> Counting matching claims…
+                  </span>
+                ) : clearPreview === null ? (
+                  'Could not count the matching claims — the run will report what it changed.'
+                ) : (
+                  `${clearPreview.toLocaleString('en-IN')} claim(s) currently carry an account and would be cleared.`
+                )}
+              </Alert>
+              <Typography variant='caption' color='text.secondary'>
+                This applies to every matching claim in those companies, not only the rows you ticked. It cannot be
+                undone — the previous account is not recorded anywhere.
+              </Typography>
+            </div>
+          )}
+        </DialogContent>
+        <DialogActions>
+          {clearResult ? (
+            <Button variant='contained' onClick={closeClearDialog}>
+              Close
+            </Button>
+          ) : (
+            <>
+              <Button color='secondary' onClick={closeClearDialog} disabled={clearSubmitting}>
+                Cancel
+              </Button>
+              <Button
+                variant='contained'
+                color='error'
+                onClick={runClearAccount}
+                disabled={
+                  clearSubmitting ||
+                  clearPreviewing ||
+                  selectedCompanies.length === 0 ||
+                  clearStatuses.length === 0 ||
+                  clearPreview === 0
+                }
+              >
+                {clearSubmitting ? <CircularProgress size={20} color='inherit' /> : 'Clear account'}
+              </Button>
+            </>
+          )}
+        </DialogActions>
+      </Dialog>
+
       <Dialog open={statusDialogOpen} onClose={closeStatusDialog} maxWidth='sm' fullWidth>
         <DialogTitle>Change Script Status</DialogTitle>
         <DialogContent>
@@ -1695,35 +2006,37 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
       </Dialog>
 
       <Dialog open={Boolean(sessionCredential)} onClose={() => setSessionCredential(null)} maxWidth='sm' fullWidth>
-        <DialogTitle>Myntra session</DialogTitle>
+        <DialogTitle>{platform === 'flipkart' ? 'Flipkart' : 'Myntra'} session</DialogTitle>
         <DialogContent>
-          {sessionCredential?.myntraSession ? (
+          {viewedSession ? (
             <div className='flex flex-col gap-3'>
               <div className='flex items-center gap-2 flex-wrap'>
                 <Typography color='text.primary' className='font-medium break-all'>
-                  {sessionCredential.username}
+                  {sessionCredential?.username}
                 </Typography>
                 <Chip
                   size='small'
                   variant='tonal'
-                  color={sessionState(sessionCredential.myntraSession).color}
-                  label={sessionState(sessionCredential.myntraSession).label}
+                  color={sessionState(viewedSession).color}
+                  label={sessionState(viewedSession).label}
                 />
-                {sessionCredential.myntraSession.expiresAt && (
+                {viewedSession.expiresAt && (
                   <Typography variant='caption' color='text.secondary'>
-                    expires {relativeToNow(sessionCredential.myntraSession.expiresAt)}
+                    expires {relativeToNow(viewedSession.expiresAt)}
                   </Typography>
                 )}
               </div>
-              {/* The record as stored, minus the cookie VALUES: `jar` holds a
-                  live erp.at JWT and session cookie, so the API sends names
-                  only and `jar` is rendered as `cookieNames`. */}
+              {/* The record as stored, minus the secrets: `jar` holds live auth
+                  cookies (and, on Flipkart, an fk-csrf-token that signs every
+                  API call), so the API sends names only — `jar` is rendered as
+                  `cookieNames` and the csrf token as a boolean. */}
               <pre className='bg-actionHover rounded border plb-3 pli-4 overflow-auto max-bs-[420px] text-xs font-mono whitespace-pre'>
-                {JSON.stringify(sessionCredential.myntraSession, null, 2)}
+                {JSON.stringify(viewedSession, null, 2)}
               </pre>
               <Typography variant='caption' color='text.secondary'>
-                Cookie values are never sent to this dashboard — `jar` is reported as `cookieNames`. `erp.at` and
-                `session` are the two the automation requires.
+                {platform === 'flipkart'
+                  ? 'Cookie values never reach this dashboard — `jar` is reported as `cookieNames`, and the fk-csrf-token only as `hasCsrfToken`.'
+                  : 'Cookie values are never sent to this dashboard — `jar` is reported as `cookieNames`. `erp.at` and `session` are the two the automation requires.'}
               </Typography>
             </div>
           ) : null}
@@ -1733,9 +2046,9 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
             color='secondary'
             startIcon={<i className='tabler-copy' />}
             onClick={() => {
-              if (!sessionCredential?.myntraSession) return
+              if (!viewedSession) return
               navigator.clipboard
-                ?.writeText(JSON.stringify(sessionCredential.myntraSession, null, 2))
+                ?.writeText(JSON.stringify(viewedSession, null, 2))
                 .then(() => setToast({ severity: 'success', message: 'Session JSON copied' }))
                 // Clipboard access is denied outside a secure context; say so
                 // rather than leaving the button looking broken.

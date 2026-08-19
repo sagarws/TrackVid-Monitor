@@ -10,6 +10,9 @@
   "dependencies": {
     "cors": "^2.8.5",
     "express": "^4.21.2",
-    "puppeteer": "^24.10.0"
+    "puppeteer": "^24.10.0",
+    "imap": "^0.8.19",
+    "mailparser": "^3.7.1",
+    "dotenv": "^16.4.7"
   }
 }
