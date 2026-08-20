@@ -48,6 +48,21 @@ import type { PlatformKey as FilterPlatformKey } from '@/configs/platforms'
 // Hook Imports
 import usePersistedSearch from '@/hooks/usePersistedSearch'
 
+// Util Imports
+import {
+  EMPTY_USAGE,
+  formatCredits,
+  formatQty,
+  formatRupees,
+  toDayKey,
+  type UsageByDateRow,
+  type UsageTotals
+} from '@/utils/usage'
+
+// Styled Component Imports — the template's react-datepicker wrapper, so the
+// calendar matches every other date field in the app.
+import AppReactDatepicker from '@/libs/styles/AppReactDatepicker'
+
 // Component Imports
 import AccountCountFilter, { useAccountFilter } from '@/components/AccountCountFilter'
 import CopyableId from '@/components/CopyableId'
@@ -70,6 +85,18 @@ export type CredentialSync = {
   password: string
   isVerified: boolean
   lastSync: string // ISO string, '' when never synced
+  // Cached login session, on the three platforms that keep one. null on every
+  // other platform, and on an account that has never had a jar harvested.
+  session: CredentialSession | null
+}
+
+// Metadata for a cached marketplace cookie jar, as the BE projects it onto the
+// credential (the same record the CMS Pending page reports). Only the expiry is
+// needed here — the cookies themselves never leave the DB.
+export type CredentialSession = {
+  savedAt: string // ISO string, '' when the record omits it
+  expiresAt: string // ISO string, '' when the record omits it
+  source: string
 }
 
 export type PlatformCredentials = {
@@ -177,6 +204,85 @@ const toIsoDate = (value: unknown): string => {
   return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString()
 }
 
+// ── Cached login sessions ────────────────────────────────────────────────
+// Three platforms keep a cookie jar per credential, harvested by a real login
+// on the automation box and reusable until it expires. Everything else logs in
+// fresh on every run and has no session to show or renew.
+// The endpoint per platform is separate because each drives a different login
+// flow (Myntra Selenium, Flipkart OTP-over-mail, AJIO Puppeteer + Reliance SSO).
+const RENEW_ENDPOINTS: Partial<Record<FilterPlatformKey, string>> = {
+  myntra: '/api/cms/renew-myntra-session',
+  flipkart: '/api/cms/renew-flipkart-session',
+  ajio: '/api/cms/renew-ajio-session'
+}
+
+export const hasSession = (key: FilterPlatformKey) => key in RENEW_ENDPOINTS
+
+// The credential subdocument carries one field per platform; a credential only
+// ever holds its own platform's jar, so the field is picked by platform rather
+// than by "whichever is present" — a stale foreign-platform record would
+// otherwise be reported as this account's session.
+const SESSION_FIELDS: Partial<Record<FilterPlatformKey, string>> = {
+  myntra: 'myntraSession',
+  flipkart: 'flipkartSession',
+  ajio: 'ajioSession'
+}
+
+const pickSession = (acc: any, key: FilterPlatformKey): CredentialSession | null => {
+  const field = SESSION_FIELDS[key]
+  const raw = field ? acc?.[field] : null
+
+  if (!raw || typeof raw !== 'object') return null
+
+  return {
+    savedAt: toIsoDate(raw.savedAt),
+    expiresAt: toIsoDate(raw.expiresAt),
+    source: String(raw.source ?? '')
+  }
+}
+
+// A jar is only useful until it expires — the automation refuses an expired one
+// and the account's claims silently stop moving, so Expired is worth its own
+// colour rather than being folded into "has a session".
+export const sessionState = (session: CredentialSession | null): {
+  label: string
+  color: 'success' | 'error' | 'default'
+} => {
+  if (!session) return { label: 'No session', color: 'default' }
+  if (!session.expiresAt) return { label: 'Unknown expiry', color: 'default' }
+
+  return new Date(session.expiresAt).getTime() > Date.now()
+    ? { label: 'Active', color: 'success' }
+    : { label: 'Expired', color: 'error' }
+}
+
+// Tooltip for the session chip: when it dies, and who minted it — a jar from
+// "chrome-extension" was pasted by the seller, one from "renew-endpoint" came
+// from this button, and that difference explains a jar that keeps dying early.
+const describeSession = (session: CredentialSession) => {
+  const parts: string[] = []
+
+  if (session.expiresAt) parts.push(`Expires ${formatSyncDate(session.expiresAt)} (${relativeToNow(session.expiresAt)})`)
+  if (session.savedAt) parts.push(`saved ${relativeToNow(session.savedAt)}`)
+  if (session.source) parts.push(`via ${session.source}`)
+
+  return parts.join(' · ') || 'Session stored, but with no expiry recorded'
+}
+
+// "in 42m" / "2h ago" — the number ops actually reads off an expiry.
+export const relativeToNow = (iso: string) => {
+  if (!iso) return ''
+  const ms = new Date(iso).getTime()
+
+  if (Number.isNaN(ms)) return ''
+
+  const diff = ms - Date.now()
+  const mins = Math.round(Math.abs(diff) / 60000)
+  const text = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`
+
+  return diff >= 0 ? `in ${text}` : `${text} ago`
+}
+
 // Build the per-platform credential breakdown from
 // company.settings.eCommercePlatformLoginInfo. Platform names are matched
 // case-insensitively — the DB holds "AJIO", "myntra", "snapdeal" inconsistently.
@@ -197,7 +303,8 @@ const pickCredentials = (loginInfo: any): PlatformCredentials[] => {
       username: String(acc?.username ?? '—'),
       password: String(acc?.password ?? ''),
       isVerified: acc?.is_verified !== false, // undefined = legacy cred, treat as verified
-      lastSync: toIsoDate(acc?.masterDataSync)
+      lastSync: toIsoDate(acc?.masterDataSync),
+      session: pickSession(acc, key)
     }))
 
     return { key, label, accounts }
@@ -274,6 +381,13 @@ type SyncResponse = {
   }
 }
 
+type UsageByDateResponse = {
+  isSuccess: boolean
+  displayMessage?: string
+  message?: string
+  data?: { date: string; rows: UsageByDateRow[] } | null
+}
+
 type ListResponse = {
   isSuccess: boolean
   displayMessage?: string
@@ -305,7 +419,7 @@ type ClearJobsResponse = {
   data?: { jobs?: RunningJob[]; matched?: number; deleted?: number; dryRun?: boolean } | null
 }
 
-type Toast = { severity: 'success' | 'error' | 'warning'; message: string }
+type Toast = { severity: 'success' | 'error' | 'warning' | 'info'; message: string }
 
 type Props = {
   impersonateBaseUrl: string
@@ -322,7 +436,9 @@ export const CredentialSyncPanel = ({
   agentReady,
   opening,
   onSyncCredential,
-  onOpenAccount
+  onOpenAccount,
+  onToast,
+  onRenewed
 }: {
   credentials: PlatformCredentials[]
   companyId: string
@@ -333,6 +449,10 @@ export const CredentialSyncPanel = ({
   opening: Set<string>
   onSyncCredential: (companyId: string, platform: PlatformKey, credentialId: string) => void
   onOpenAccount: (platform: FilterPlatformKey, account: CredentialSync) => void
+  // Renewal reports through the host page's snackbar, and asks it to refetch so
+  // the new expiry replaces the old chip.
+  onToast: (toast: Toast) => void
+  onRenewed: () => void
 }) => {
   // Which passwords are currently revealed, by credentialId. Masked by default
   // and never persisted: this panel is opened on shared screens, and a password
@@ -342,6 +462,68 @@ export const CredentialSyncPanel = ({
 
   const toggleReveal = (credentialId: string) =>
     setRevealed(prev => ({ ...prev, [credentialId]: !prev[credentialId] }))
+
+  // credentialIds with a renewal in flight. Owned here rather than by the host
+  // page because both pages that render this panel would otherwise carry the
+  // same state and the same fetch — the button is only ever pressed from here.
+  const [renewing, setRenewing] = useState<Set<string>>(new Set())
+
+  // Force a fresh login for one credential and cache the jar it harvests. The
+  // request blocks for the whole login (~30-60s, longer when the account trips
+  // a bot check), so the row spins for the duration instead of the page going
+  // modal — every other company stays usable meanwhile.
+  const renewSession = async (platform: FilterPlatformKey, acc: CredentialSync) => {
+    const endpoint = RENEW_ENDPOINTS[platform]
+
+    if (!endpoint || !acc.credentialId || !companyId) return
+
+    const label = PLATFORMS.find(p => p.key === platform)?.label ?? platform
+
+    setRenewing(prev => new Set(prev).add(acc.credentialId))
+    onToast({ severity: 'info', message: `Logging in to ${label} as ${acc.username} — this takes up to a minute…` })
+
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyId, credentialId: acc.credentialId })
+      })
+
+      const json = await res.json().catch(() => null)
+
+      if (!res.ok || !json?.isSuccess) {
+        onToast({
+          severity: 'error',
+          message: json?.displayMessage || json?.message || `Renewal failed (${res.status})`
+        })
+
+        return
+      }
+
+      const expiresAt = toIsoDate(json.data?.expiresAt)
+
+      onToast({
+        severity: 'success',
+        message: expiresAt
+          ? `Session renewed for ${acc.username} — expires ${relativeToNow(expiresAt)}`
+          : `Session renewed for ${acc.username}`
+      })
+
+      // Refetch rather than patching the row: the same seller account can be
+      // configured under another company, and the reload picks those up too.
+      onRenewed()
+    } catch (err: any) {
+      onToast({ severity: 'error', message: err?.message || 'Renewal request failed' })
+    } finally {
+      setRenewing(prev => {
+        const next = new Set(prev)
+
+        next.delete(acc.credentialId)
+
+        return next
+      })
+    }
+  }
 
   return (
   // A real table rather than stacked flex rows: the account and its timestamp
@@ -355,6 +537,7 @@ export const CredentialSyncPanel = ({
           <tr>
             <th className='is-[160px]'>Platform</th>
             <th>Account</th>
+            <th className='is-[240px]'>Session</th>
             <th className='is-[120px]'>Status</th>
             <th className='is-[200px]'>Last sync</th>
             <th className='is-[80px] text-center'>Sync</th>
@@ -371,7 +554,7 @@ export const CredentialSyncPanel = ({
                       {label}
                     </Typography>
                   </td>
-                  <td colSpan={5}>
+                  <td colSpan={6}>
                     <Typography variant='body2' color='text.disabled'>
                       No accounts configured
                     </Typography>
@@ -385,6 +568,8 @@ export const CredentialSyncPanel = ({
             return accounts.map((acc, i) => {
               const busy = inFlight.has(`${companyId}:${key}:${acc.credentialId}`)
               const openingThis = opening.has(`${key}:${acc.username}`)
+              const renewingThis = renewing.has(acc.credentialId)
+              const state = sessionState(acc.session)
 
               return (
                 <tr key={acc.credentialId || `${key}-${acc.username}`}>
@@ -445,6 +630,54 @@ export const CredentialSyncPanel = ({
                         </Tooltip>
                       )}
                     </div>
+                  </td>
+                  {/* Cached login jar + the button that mints a new one. Blank
+                      on the platforms that log in fresh every run — a Renew
+                      there would only ever 400. */}
+                  <td>
+                    {hasSession(key) ? (
+                      <div className='flex items-center gap-2'>
+                        <Tooltip
+                          title={
+                            acc.session ? describeSession(acc.session) : 'No cookie jar stored for this account'
+                          }
+                        >
+                          <Chip size='small' variant='tonal' color={state.color} label={state.label} />
+                        </Tooltip>
+                        <Tooltip
+                          title={
+                            renewingThis
+                              ? `Logging in to ${label} — this takes up to a minute`
+                              : acc.credentialId
+                                ? `Run a fresh ${label} login and store the new session`
+                                : 'Credential has no id — cannot renew'
+                          }
+                        >
+                          <span>
+                            <Button
+                              size='small'
+                              variant='tonal'
+                              color='primary'
+                              disabled={renewingThis || !acc.credentialId || !companyId}
+                              startIcon={
+                                renewingThis ? (
+                                  <CircularProgress size={14} color='inherit' />
+                                ) : (
+                                  <i className='tabler-refresh' />
+                                )
+                              }
+                              onClick={() => renewSession(key, acc)}
+                            >
+                              {renewingThis ? 'Renewing' : 'Renew'}
+                            </Button>
+                          </span>
+                        </Tooltip>
+                      </div>
+                    ) : (
+                      <Typography variant='body2' color='text.disabled'>
+                        —
+                      </Typography>
+                    )}
                   </td>
                   <td>
                     {acc.isVerified ? (
@@ -529,6 +762,10 @@ export const CredentialSyncPanel = ({
 }
 
 const columnHelper = createColumnHelper<CompanyRow>()
+
+// Computed once per mount: the usage columns default to today, and comparing
+// against this is how the Filter badge knows the day has been moved.
+const TODAY_KEY = toDayKey(new Date())
 
 const CompanyList = ({ impersonateBaseUrl }: Props) => {
   const router = useRouter()
@@ -705,6 +942,17 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   // so anything quieter than that is dead; 0 means "every RUNNING row".
   const [jobsStaleMinutes, setJobsStaleMinutes] = useState(5)
 
+  // ── Usage columns ───────────────────────────────────────────────────────
+  // One day's orders and credits per company, alongside the row. Defaults to
+  // today because "what has this company done today" is the question the list
+  // is open for; any other day is a filter away.
+  const [usageDate, setUsageDate] = useState<Date>(() => new Date())
+  const [usage, setUsage] = useState<Record<string, UsageTotals>>({})
+  const [usageLoading, setUsageLoading] = useState(false)
+  const [usageError, setUsageError] = useState<string | null>(null)
+
+  const usageDay = toDayKey(usageDate)
+
   const selectedPlatforms = useMemo(
     () => (Object.keys(filterPlatforms) as FilterPlatformKey[]).filter(k => filterPlatforms[k]),
     [filterPlatforms]
@@ -735,7 +983,10 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     (credentialVerified ? 1 : 0) +
     (masterDataSynced ? 1 : 0) +
     (isUsingMasterData ? 1 : 0) +
-    (account.payload ? 1 : 0)
+    (account.payload ? 1 : 0) +
+    // The usage day is always set, so it only counts as a filter once it is
+    // something other than the default — otherwise the badge would never be 0.
+    (usageDay === TODAY_KEY ? 0 : 1)
 
   const clearFilters = useCallback(() => {
     setFilterPlatforms(NO_PLATFORM_FILTERS)
@@ -746,6 +997,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     setFilterSyncedNo(false)
     setFilterUsingMdYes(false)
     setFilterUsingMdNo(false)
+    setUsageDate(new Date())
     account.setFilters(['all'])
     setPage(0)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -854,6 +1106,60 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   useEffect(() => {
     fetchRows()
   }, [fetchRows])
+
+  // Usage is fetched for the companies ON THIS PAGE, not for all 620: the
+  // columns only render the visible rows, and a day's usage across every
+  // company is a report, not a table cell. Re-runs when the page changes or the
+  // day is moved.
+  const usageReqRef = useRef(0)
+
+  useEffect(() => {
+    const companyIds = rows.map(r => r.companyId).filter(Boolean)
+
+    if (companyIds.length === 0) {
+      setUsage({})
+      setUsageError(null)
+
+      return
+    }
+
+    const reqId = ++usageReqRef.current
+
+    setUsageLoading(true)
+    setUsageError(null)
+
+    const run = async () => {
+      try {
+        const res = await fetch('/api/company/usage-by-date', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ companyIds, date: usageDay })
+        })
+
+        const json = (await res.json().catch(() => null)) as UsageByDateResponse | null
+
+        // A newer page (or day) is already in flight — drop this answer.
+        if (reqId !== usageReqRef.current) return
+
+        if (!res.ok || !json?.isSuccess) {
+          setUsage({})
+          setUsageError(json?.displayMessage || json?.message || `Usage request failed (${res.status})`)
+
+          return
+        }
+
+        setUsage(Object.fromEntries((json.data?.rows ?? []).map(r => [r.companyId, r])))
+      } catch (err: any) {
+        if (reqId !== usageReqRef.current) return
+        setUsage({})
+        setUsageError(err?.message || 'Failed to load usage')
+      } finally {
+        if (reqId === usageReqRef.current) setUsageLoading(false)
+      }
+    }
+
+    run()
+  }, [rows, usageDay])
 
   const selectedCompanyIds = useMemo(
     () => Object.entries(selected).filter(([, v]) => v).map(([k]) => k),
@@ -1233,6 +1539,76 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
           </div>
         )
       },
+      // ── One day's usage, straight off the company's own Accounts page ──
+      // A company with no usage document for the day used nothing, so the cells
+      // read as zeros rather than as "—": the difference between "no orders"
+      // and "no data" does not exist here.
+      ...(
+        [
+          { id: 'usageCms', header: 'CMS', qty: 'cms_orders', credits: 'cms_orders_credits' },
+          { id: 'usageForward', header: 'Forward', qty: 'forward_orders', credits: 'forward_orders_credits' },
+          { id: 'usageReturn', header: 'Return', qty: 'return_orders', credits: 'return_orders_credits' }
+        ] as const
+      ).map(({ id, header, qty, credits }) => ({
+        id,
+        enableSorting: false,
+        header: () => (
+          <div className='flex flex-col leading-none'>
+            <span>{header}</span>
+            <Typography variant='caption' color='text.disabled' className='leading-none'>
+              (Qty / Credits)
+            </Typography>
+          </div>
+        ),
+        cell: ({ row }: { row: { original: CompanyRow } }) => {
+          const u = usage[row.original.companyId] ?? EMPTY_USAGE
+
+          return (
+            <Typography variant='body2' className='whitespace-nowrap tabular-nums'>
+              {formatQty(u[qty])} / {formatCredits(u[credits])}
+            </Typography>
+          )
+        }
+      })),
+      {
+        id: 'usageTotals',
+        enableSorting: false,
+        header: () => (
+          <div className='flex flex-col leading-none'>
+            <span>Total</span>
+            <Typography variant='caption' color='text.disabled' className='leading-none'>
+              (Orders / Credits)
+            </Typography>
+          </div>
+        ),
+        cell: ({ row }) => {
+          const u = usage[row.original.companyId] ?? EMPTY_USAGE
+
+          return (
+            <Typography variant='body2' className='whitespace-nowrap tabular-nums'>
+              {formatQty(u.total_orders)} / {formatCredits(u.total_orders_credits)}
+            </Typography>
+          )
+        }
+      },
+      {
+        id: 'usageAmount',
+        header: 'Effective Amount',
+        enableSorting: false,
+        cell: ({ row }) => {
+          const u = usage[row.original.companyId] ?? EMPTY_USAGE
+
+          return (
+            <Typography
+              variant='body2'
+              color={u.total_effective_amount ? 'text.primary' : 'text.disabled'}
+              className='whitespace-nowrap tabular-nums'
+            >
+              {formatRupees(u.total_effective_amount)}
+            </Typography>
+          )
+        }
+      },
       {
         id: 'action',
         header: 'Action',
@@ -1266,12 +1642,16 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // `expanded` must stay here — the expander cell renders the chevron's
     // rotated state, so without it the arrow never flips on open/close.
-    [impersonateBaseUrl, selected, inFlight, pageIdsAllSelected, pageIdsSomeSelected, rows, expanded, toggleExpanded]
+    [impersonateBaseUrl, selected, inFlight, pageIdsAllSelected, pageIdsSomeSelected, rows, expanded, toggleExpanded, usage]
   )
 
   const table = useReactTable({
     data: rows,
     columns,
+    // The template augments @tanstack/table-core with a `fuzzy` filter, which
+    // makes filterFns required on every table. This one filters server-side,
+    // so the entry is satisfied with a pass-through rather than a real filter.
+    filterFns: { fuzzy: () => true },
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel()
   })
@@ -1342,6 +1722,30 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
               {activeFilterCount ? ' found' : ''}
             </Typography>
           </div>
+          {/* Which day the usage columns are reporting. Visible without opening
+              the filter panel, because a table of yesterday's numbers is
+              indistinguishable from today's until it says so. */}
+          <Tooltip
+            title={
+              usageError
+                ? usageError
+                : `CMS / Forward / Return / Total / Effective Amount are ${
+                    usageDay === TODAY_KEY ? "today's" : 'that day’s'
+                  } usage — change the day in Filter`
+            }
+          >
+            <Chip
+              size='small'
+              variant='tonal'
+              color={usageError ? 'error' : usageDay === TODAY_KEY ? 'secondary' : 'warning'}
+              icon={usageLoading ? <CircularProgress size={12} color='inherit' /> : undefined}
+              label={`Usage: ${
+                usageDay === TODAY_KEY
+                  ? 'Today'
+                  : usageDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+              }`}
+            />
+          </Tooltip>
           <Badge
             badgeContent={activeFilterCount}
             color='primary'
@@ -1392,6 +1796,53 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
             </div>
 
             <div className='flex flex-col gap-4 plb-4 pli-4 max-bs-[60vh] overflow-y-auto'>
+              {/* Usage day. First in the panel because it is the only control
+                  here that changes what the columns SAY rather than which rows
+                  survive — everything below narrows the list instead.
+                  The calendar is inline rather than a popper: this panel scrolls
+                  and clips its own overflow, which would cut a floating
+                  calendar in half. */}
+              <div className='flex flex-col gap-1'>
+                <Typography variant='overline' color='text.disabled' className='leading-none'>
+                  Usage day
+                </Typography>
+                <Typography variant='caption' color='text.secondary' className='mbe-1'>
+                  The day the CMS / Forward / Return columns report. Days are bucketed at UTC midnight.
+                </Typography>
+                <div className='flex items-center gap-2 flex-wrap mbe-1'>
+                  <Chip
+                    size='small'
+                    variant='tonal'
+                    color={usageDay === TODAY_KEY ? 'primary' : 'warning'}
+                    label={usageDate.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                  />
+                  <Button
+                    size='small'
+                    color='secondary'
+                    disabled={usageDay === TODAY_KEY}
+                    onClick={() => setUsageDate(new Date())}
+                  >
+                    Today
+                  </Button>
+                  <Button
+                    size='small'
+                    color='secondary'
+                    onClick={() => setUsageDate(new Date(Date.now() - 24 * 60 * 60 * 1000))}
+                  >
+                    Yesterday
+                  </Button>
+                </div>
+                <AppReactDatepicker
+                  inline
+                  selected={usageDate}
+                  onChange={(date: Date | null) => date && setUsageDate(date)}
+                  // Usage is only ever written for a day that has happened.
+                  maxDate={new Date()}
+                />
+              </div>
+
+              <Divider />
+
               <div className='flex flex-col gap-1'>
                 <Typography variant='overline' color='text.disabled' className='leading-none'>
                   Using master data
@@ -1728,6 +2179,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
                           opening={opening}
                           onSyncCredential={runSyncForCredential}
                           onOpenAccount={openAccount}
+                          onToast={setToast}
+                          onRenewed={fetchRows}
                         />
                       </td>
                     </tr>

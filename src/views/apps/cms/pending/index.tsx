@@ -76,8 +76,18 @@ export type MyntraSession = {
   // platform sets only its own flag.
   hasProxySession?: boolean
   hasCsrfToken?: boolean
+  // AJIO adds two: the seller's activeSellerProfileId (needed to build every
+  // API URL) and the count of PoBs saved with the session. Both are non-secret
+  // (already visible in the UI) so exposing them helps ops read the record.
+  userId?: string | null
+  pobCount?: number
   cookieNames: string[]
 }
+
+// AJIO reuses the same summary shape via optional fields on MyntraSession
+// (userId + pobCount above). One export keeps the render code polymorphic
+// across the three platforms.
+export type AjioSession = MyntraSession
 
 // One configured login on the platform being reported on.
 export type PlatformCredential = {
@@ -89,6 +99,7 @@ export type PlatformCredential = {
   visible: boolean
   myntraSession: MyntraSession | null
   flipkartSession: MyntraSession | null
+  ajioSession: AjioSession | null
 }
 
 export type PendingCompanyRow = {
@@ -300,6 +311,17 @@ const mapCompanyToRow = (c: any): PendingCompanyRow => ({
             hasCsrfToken: Boolean(cred.flipkartSession.hasCsrfToken),
             cookieNames: Array.isArray(cred.flipkartSession.cookieNames) ? cred.flipkartSession.cookieNames : []
           }
+        : null,
+      ajioSession: cred?.ajioSession
+        ? {
+            savedAt: cred.ajioSession.savedAt ?? null,
+            expiresAt: cred.ajioSession.expiresAt ?? null,
+            ip: cred.ajioSession.ip ?? null,
+            source: cred.ajioSession.source ?? null,
+            userId: cred.ajioSession.userId ?? null,
+            pobCount: Number(cred.ajioSession.pobCount ?? 0),
+            cookieNames: Array.isArray(cred.ajioSession.cookieNames) ? cred.ajioSession.cookieNames : []
+          }
         : null
     })
   ),
@@ -388,12 +410,15 @@ const CredentialsPanel = ({
 }) => {
   const isMyntra = platform === 'myntra'
   const isFlipkart = platform === 'flipkart'
+  const isAjio = platform === 'ajio'
 
-  // Both platforms cache a session per credential and can renew it on demand;
-  // every other platform logs in fresh each run and has nothing to show here.
-  const supportsSession = isMyntra || isFlipkart
-  const sessionLabel = isFlipkart ? 'Flipkart session' : 'Myntra session'
-  const sessionFor = (cred: PlatformCredential) => (isFlipkart ? cred.flipkartSession : cred.myntraSession)
+  // These three platforms cache a session per credential and can renew it on
+  // demand; every other platform logs in fresh each run and has nothing to
+  // show here.
+  const supportsSession = isMyntra || isFlipkart || isAjio
+  const sessionLabel = isFlipkart ? 'Flipkart session' : isAjio ? 'AJIO session' : 'Myntra session'
+  const sessionFor = (cred: PlatformCredential) =>
+    isFlipkart ? cred.flipkartSession : isAjio ? cred.ajioSession : cred.myntraSession
 
   return (
     <div className='overflow-auto rounded border mbe-4'>
@@ -704,9 +729,13 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   const [sessionCredential, setSessionCredential] = useState<PlatformCredential | null>(null)
 
   // Which stored session the eye-icon dialog is showing. Derived from the
-  // selected platform so one dialog serves both Myntra and Flipkart.
+  // selected platform so one dialog serves Myntra, Flipkart, and AJIO.
   const viewedSession =
-    (platform === 'flipkart' ? sessionCredential?.flipkartSession : sessionCredential?.myntraSession) ?? null
+    (platform === 'flipkart'
+      ? sessionCredential?.flipkartSession
+      : platform === 'ajio'
+        ? sessionCredential?.ajioSession
+        : sessionCredential?.myntraSession) ?? null
   // credentialIds with a renewal in flight.
   const [renewing, setRenewing] = useState<Set<string>>(new Set())
 
@@ -925,10 +954,14 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
       }
 
       // The renew endpoint is per-platform: each one drives a different login
-      // flow on the automation box, and only these two cache a session at all.
+      // flow on the automation box, and only these three cache a session at all.
       const renewEndpoint =
-        platform === 'flipkart' ? '/api/cms/renew-flipkart-session' : '/api/cms/renew-myntra-session'
-      const platformName = platform === 'flipkart' ? 'Flipkart' : 'Myntra'
+        platform === 'flipkart'
+          ? '/api/cms/renew-flipkart-session'
+          : platform === 'ajio'
+            ? '/api/cms/renew-ajio-session'
+            : '/api/cms/renew-myntra-session'
+      const platformName = platform === 'flipkart' ? 'Flipkart' : platform === 'ajio' ? 'AJIO' : 'Myntra'
 
       setRenewing(prev => new Set(prev).add(credential.credentialId))
       setToast({ severity: 'info', message: `Logging in to ${platformName} as ${credential.username}…` })

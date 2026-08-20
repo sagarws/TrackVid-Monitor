@@ -27,6 +27,7 @@ import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
 
 // Component Imports
+import UsageCard from './UsageCard'
 import CopyButton from '@/components/CopyButton'
 import CopyableId from '@/components/CopyableId'
 import CustomTextField from '@core/components/mui/TextField'
@@ -814,8 +815,15 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
               opening={opening}
               onSyncCredential={runSyncForCredential}
               onOpenAccount={openAccount}
+              onToast={setToast}
+              onRenewed={fetchCompany}
             />
           </Card>
+
+          {/* Last card on the page: the company's own Accounts view. It answers
+              billing questions rather than automation ones, so it sits below
+              everything ops touches day to day. */}
+          <UsageCard companyId={row.companyId} />
         </>
       ) : null}
 
