@@ -381,6 +381,11 @@ type SyncResponse = {
   }
 }
 
+// The usage figures the list can order by — the first number of each usage
+// column, which is what the header's arrow refers to. Mirrors the BE's own
+// whitelist in companyList.
+type UsageSortField = 'cms_orders' | 'forward_orders' | 'return_orders' | 'total_orders' | 'total_effective_amount'
+
 type UsageByDateResponse = {
   isSuccess: boolean
   displayMessage?: string
@@ -761,6 +766,51 @@ export const CredentialSyncPanel = ({
   )
 }
 
+// Header for a sortable usage column. The arrow is always drawn — a sort that
+// only announces itself once used is a sort nobody finds — and dims to a
+// neutral up/down when this column is not the one ordering the list.
+const UsageSortHeader = ({
+  title,
+  caption,
+  sortedBy,
+  active,
+  onClick
+}: {
+  title: string
+  caption?: string
+  // Which number the arrow orders by, named in the tooltip: each cell shows two
+  // and the column sorts on the first.
+  sortedBy: string
+  active: 'asc' | 'desc' | null
+  onClick: () => void
+}) => (
+  <Tooltip
+    title={
+      active
+        ? `Sorted by ${sortedBy}, ${active === 'desc' ? 'highest first' : 'lowest first'}, across every company in the current filter. Click to ${active === 'desc' ? 'reverse' : 'clear'}.`
+        : `Sort every company in the current filter by ${sortedBy} on the selected day`
+    }
+  >
+    <div className='flex items-center gap-1 cursor-pointer select-none' onClick={onClick}>
+      <div className='flex flex-col leading-none'>
+        <span>{title}</span>
+        {caption && (
+          <Typography variant='caption' color='text.disabled' className='leading-none'>
+            {caption}
+          </Typography>
+        )}
+      </div>
+      <i
+        className={classnames('text-lg', {
+          'tabler-chevron-down': active === 'desc',
+          'tabler-chevron-up': active === 'asc',
+          'tabler-arrows-sort opacity-40': !active
+        })}
+      />
+    </div>
+  </Tooltip>
+)
+
 const columnHelper = createColumnHelper<CompanyRow>()
 
 // Computed once per mount: the usage columns default to today, and comparing
@@ -951,7 +1001,20 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   const [usageLoading, setUsageLoading] = useState(false)
   const [usageError, setUsageError] = useState<string | null>(null)
 
+  // Ordering by a usage column is done by the DB across every company that
+  // survived the filters, not by the table across the ten rows on screen —
+  // "who spent the most today" is a question about the estate, and a page-local
+  // sort would answer it with whichever ten companies happened to load.
+  const [usageSort, setUsageSort] = useState<{ field: UsageSortField; dir: 'asc' | 'desc' } | null>(null)
+
   const usageDay = toDayKey(usageDate)
+
+  // none → desc (biggest first, the useful default) → asc → none.
+  const cycleUsageSort = useCallback((field: UsageSortField) => {
+    setUsageSort(prev => (prev?.field !== field ? { field, dir: 'desc' } : prev.dir === 'desc' ? { field, dir: 'asc' } : null))
+    // A new order makes the current page number meaningless.
+    setPage(0)
+  }, [])
 
   const selectedPlatforms = useMemo(
     () => (Object.keys(filterPlatforms) as FilterPlatformKey[]).filter(k => filterPlatforms[k]),
@@ -1059,7 +1122,10 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
           ...(credentialVerified ? { credentialVerified } : {}),
           ...(masterDataSynced ? { masterDataSynced } : {}),
           ...(isUsingMasterData ? { isUsingMasterData } : {}),
-          ...(account.payload ? { accountFilter: account.payload } : {})
+          ...(account.payload ? { accountFilter: account.payload } : {}),
+          // Omitted unless a usage column is actually sorted — it costs the BE
+          // a join across every matched company.
+          ...(usageSort ? { usageSort: { field: usageSort.field, direction: usageSort.dir, date: usageDay } } : {})
         })
       })
 
@@ -1099,7 +1165,12 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     credentialVerified,
     masterDataSynced,
     isUsingMasterData,
-    account.payloadKey
+    account.payloadKey,
+    usageSort,
+    // Only when a usage sort is on: moving the day then reorders the list, so
+    // the rows have to be re-fetched. Without a sort the day only changes what
+    // the columns say, which the usage request below handles on its own.
+    usageSort ? usageDay : ''
     // eslint-disable-next-line react-hooks/exhaustive-deps
   ])
 
@@ -1553,12 +1624,13 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
         id,
         enableSorting: false,
         header: () => (
-          <div className='flex flex-col leading-none'>
-            <span>{header}</span>
-            <Typography variant='caption' color='text.disabled' className='leading-none'>
-              (Qty / Credits)
-            </Typography>
-          </div>
+          <UsageSortHeader
+            title={header}
+            caption='(Qty / Credits)'
+            sortedBy={`${header} orders`}
+            active={usageSort?.field === qty ? usageSort.dir : null}
+            onClick={() => cycleUsageSort(qty)}
+          />
         ),
         cell: ({ row }: { row: { original: CompanyRow } }) => {
           const u = usage[row.original.companyId] ?? EMPTY_USAGE
@@ -1574,12 +1646,13 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
         id: 'usageTotals',
         enableSorting: false,
         header: () => (
-          <div className='flex flex-col leading-none'>
-            <span>Total</span>
-            <Typography variant='caption' color='text.disabled' className='leading-none'>
-              (Orders / Credits)
-            </Typography>
-          </div>
+          <UsageSortHeader
+            title='Total'
+            caption='(Orders / Credits)'
+            sortedBy='total orders'
+            active={usageSort?.field === 'total_orders' ? usageSort.dir : null}
+            onClick={() => cycleUsageSort('total_orders')}
+          />
         ),
         cell: ({ row }) => {
           const u = usage[row.original.companyId] ?? EMPTY_USAGE
@@ -1593,8 +1666,15 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
       },
       {
         id: 'usageAmount',
-        header: 'Effective Amount',
         enableSorting: false,
+        header: () => (
+          <UsageSortHeader
+            title='Effective Amount'
+            sortedBy='effective amount'
+            active={usageSort?.field === 'total_effective_amount' ? usageSort.dir : null}
+            onClick={() => cycleUsageSort('total_effective_amount')}
+          />
+        ),
         cell: ({ row }) => {
           const u = usage[row.original.companyId] ?? EMPTY_USAGE
 
@@ -1642,7 +1722,19 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // `expanded` must stay here — the expander cell renders the chevron's
     // rotated state, so without it the arrow never flips on open/close.
-    [impersonateBaseUrl, selected, inFlight, pageIdsAllSelected, pageIdsSomeSelected, rows, expanded, toggleExpanded, usage]
+    [
+      impersonateBaseUrl,
+      selected,
+      inFlight,
+      pageIdsAllSelected,
+      pageIdsSomeSelected,
+      rows,
+      expanded,
+      toggleExpanded,
+      usage,
+      usageSort,
+      cycleUsageSort
+    ]
   )
 
   const table = useReactTable({
