@@ -51,6 +51,11 @@ import tableStyles from '@core/styles/table.module.css'
 // browser's timezone, which would silently shift every row by the local offset.
 export type PendingClaim = {
   claimId: string
+  // CMS_STATUS — the claim's own lifecycle status, as opposed to
+  // scriptProcessingStatus below, which is the auto-claim runner's. Only
+  // interesting once the status filter can return more than Pending, so it is
+  // null on responses from a BE that predates it.
+  status: string | null
   typeOfReason: string
   userId: string
   AWBNumber: string
@@ -164,6 +169,31 @@ const CLAIM_STATUSES = [
   'Failed to Proceed'
 ] as const
 
+// Sentinel for "every status" — matches the string the BE reads as "drop the
+// status filter", so the selection is sent as-is.
+const ALL_STATUSES = 'all'
+
+type StatusFilterKey = typeof ALL_STATUSES | (typeof CLAIM_STATUSES)[number]
+
+const STATUS_FILTER_OPTIONS: { key: StatusFilterKey; label: string }[] = [
+  { key: ALL_STATUSES, label: 'All' },
+  ...CLAIM_STATUSES.map(status => ({ key: status as StatusFilterKey, label: status }))
+]
+
+// Same exclusivity rule AccountCountFilter uses: "All" is the absence of a
+// filter, so it cannot sit alongside a named status. Clearing the last named
+// status falls back to Pending rather than to an empty filter — this report is
+// the pending backlog first, and an empty selection would silently mean "all".
+const normalizeStatusFilters = (picked: StatusFilterKey[], previous: StatusFilterKey[]): StatusFilterKey[] => {
+  if (picked.length === 0) return ['Pending']
+
+  if (picked.includes(ALL_STATUSES) && !previous.includes(ALL_STATUSES)) return [ALL_STATUSES]
+
+  const named = picked.filter(key => key !== ALL_STATUSES)
+
+  return named.length > 0 ? named : [ALL_STATUSES]
+}
+
 // Which field the clear touches, per platform. Mirrors
 // USERNAME_FIELD_BY_PLATFORM in the BE controller — shown in the dialog so the
 // operator can see what is about to be unset rather than trusting the label.
@@ -255,7 +285,7 @@ type Toast = { severity: 'success' | 'error' | 'warning' | 'info'; message: stri
 // A claim is selected by id; its company is carried along so the confirm dialog
 // can still name the companies after a page change, and `processable` so the
 // dispatchable count survives too.
-type SelectedClaim = { companyId: string; companyName: string; processable: boolean }
+type SelectedClaim = { companyId: string; companyName: string; processable: boolean; status: string | null }
 
 type Props = {
   impersonateBaseUrl: string
@@ -272,6 +302,22 @@ const statusColor = (status: string | null): 'default' | 'success' | 'error' | '
   if (s.includes('complete') || s.includes('success') || s.includes('done')) return 'success'
   if (s.includes('progress') || s.includes('running') || s.includes('process')) return 'info'
   if (s.includes('not started') || s.includes('pending') || s.includes('queue')) return 'warning'
+
+  return 'default'
+}
+
+// Claim lifecycle colours. Deliberately separate from statusColor above: that
+// one reads the runner's vocabulary ("Success", "Not Started"), and its rules
+// would paint the claim's own wins ("Approved", "Resolved", "Paid") as neutral
+// chips while matching "Failed to Proceed" on the same word as a script error.
+const claimStatusColor = (status: string | null): 'default' | 'success' | 'error' | 'warning' | 'info' => {
+  const s = (status ?? '').toLowerCase()
+
+  if (!s) return 'default'
+  if (s.includes('reject') || s.includes('failed')) return 'error'
+  if (s === 'approved' || s === 'resolved' || s === 'paid') return 'success'
+  if (s === 'pending' || s === 'un attended' || s.includes('awaiting')) return 'warning'
+  if (s.includes('progress') || s.includes('review') || s.includes('replied')) return 'info'
 
   return 'default'
 }
@@ -327,6 +373,7 @@ const mapCompanyToRow = (c: any): PendingCompanyRow => ({
   ),
   claims: (Array.isArray(c?.pendingClaims) ? c.pendingClaims : []).map((claim: any): PendingClaim => ({
     claimId: String(claim?.claimId ?? ''),
+    status: claim?.status ?? null,
     typeOfReason: String(claim?.typeOfReason ?? ''),
     userId: String(claim?.userId ?? ''),
     AWBNumber: String(claim?.AWBNumber ?? ''),
@@ -550,6 +597,7 @@ const CredentialsPanel = ({
 // panel owns its own horizontal scrollbar and the company table keeps fitting.
 const PendingClaimsPanel = ({
   claims,
+  claimTotal,
   credentials,
   platform,
   companyId,
@@ -562,6 +610,7 @@ const PendingClaimsPanel = ({
   onRenewSession
 }: {
   claims: PendingClaim[]
+  claimTotal: number
   credentials: PlatformCredential[]
   platform: PlatformKey
   companyId: string
@@ -604,7 +653,8 @@ const PendingClaimsPanel = ({
             <th className='is-[200px]'>Account</th>
             <th className='is-[170px]'>Created</th>
             <th className='is-[80px] text-center'>Tries</th>
-            <th className='is-[140px]'>Status</th>
+            <th className='is-[150px]'>Claim Status</th>
+            <th className='is-[140px]'>Script Status</th>
             <th>Error</th>
           </tr>
         </thead>
@@ -674,6 +724,14 @@ const PendingClaimsPanel = ({
                   <Chip
                     size='small'
                     variant='tonal'
+                    color={claimStatusColor(claim.status)}
+                    label={claim.status?.trim() || 'No status'}
+                  />
+                </td>
+                <td>
+                  <Chip
+                    size='small'
+                    variant='tonal'
                     color={statusColor(claim.scriptProcessingStatus)}
                     label={claim.scriptProcessingStatus?.trim() || 'No status'}
                   />
@@ -697,6 +755,12 @@ const PendingClaimsPanel = ({
         </tbody>
       </table>
     </div>
+    {claimTotal > claims.length && (
+      <Typography variant='caption' color='text.secondary' className='mbs-2 block'>
+        Showing the oldest {claims.length.toLocaleString('en-IN')} of {claimTotal.toLocaleString('en-IN')} claims — the
+        server caps the list per company. Narrow the status filter to see the rest.
+      </Typography>
+    )}
   </div>
 )
 
@@ -709,6 +773,9 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   const [pageSize, setPageSize] = useState(10)
   const [platform, setPlatform] = useState<PlatformKey>('myntra')
   const [sort, setSort] = useState<SortKey>('desc')
+  // Claim status. Pending only by default — the backlog this page exists to
+  // work — with "All" available for reading a company's whole claim history.
+  const [statuses, setStatuses] = useState<StatusFilterKey[]>(['Pending'])
   // Defaults to "Non Zero Account": a company with no credential configured on
   // the platform cannot have its claims dispatched at all, so those rows are
   // noise on first load and are opted into rather than out of.
@@ -779,6 +846,18 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
     return () => clearTimeout(t)
   }, [search])
 
+  // Stable fetch dependency: the array itself is a new reference on every
+  // setStatuses call even when the selection is unchanged.
+  const statusesKey = statuses.join('|')
+  const pendingOnly = statuses.length === 1 && statuses[0] === 'Pending'
+  // What the count column and the subheader are counting, so neither says
+  // "pending" while the table is showing resolved claims.
+  const statusLabel = statuses.includes(ALL_STATUSES)
+    ? 'claims in any status'
+    : pendingOnly
+      ? 'pending claims'
+      : `${statuses.join(', ')} claims`
+
   const reqIdRef = useRef(0)
 
   const fetchRows = useCallback(async () => {
@@ -797,6 +876,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
           search: debouncedSearch,
           eCommercePlatform: platform,
           sort,
+          statuses,
           ...(account.payload ? { accountFilter: account.payload } : {})
         })
       })
@@ -829,7 +909,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
       if (reqId === reqIdRef.current) setLoading(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, debouncedSearch, platform, sort, account.payloadKey])
+  }, [page, pageSize, debouncedSearch, platform, sort, statusesKey, account.payloadKey])
 
   useEffect(() => {
     fetchRows()
@@ -853,7 +933,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
       const next = { ...prev }
 
       if (next[claim.claimId]) delete next[claim.claimId]
-      else next[claim.claimId] = { companyId, companyName, processable: isProcessable(claim) }
+      else next[claim.claimId] = { companyId, companyName, processable: isProcessable(claim), status: claim.status }
 
       return next
     })
@@ -874,7 +954,8 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
           next[claim.claimId] = {
             companyId: row.companyId,
             companyName: row.companyName,
-            processable: isProcessable(claim)
+            processable: isProcessable(claim),
+            status: claim.status
           }
       }
 
@@ -906,7 +987,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
 
       for (const { claim, companyId, companyName } of pageClaims) {
         if (pageAllSelected) delete next[claim.claimId]
-        else next[claim.claimId] = { companyId, companyName, processable: isProcessable(claim) }
+        else next[claim.claimId] = { companyId, companyName, processable: isProcessable(claim), status: claim.status }
       }
 
       return next
@@ -919,6 +1000,24 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   const processableSelectedIds = useMemo(() => selectedIds.filter(id => selected[id].processable), [selectedIds, selected])
 
   const blockedSelectedCount = selectedIds.length - processableSelectedIds.length
+
+  // Claim statuses in the selection other than Pending. The dispatch endpoint
+  // gates on scriptProcessingStatus only, so a Resolved or Paid claim picked up
+  // while browsing history would be re-run without complaint — surface it
+  // rather than silently sending it.
+  const nonPendingSelected = useMemo(() => {
+    const counts = new Map<string, number>()
+
+    for (const id of processableSelectedIds) {
+      const status = selected[id].status?.trim() || 'No status'
+
+      if (status !== 'Pending') counts.set(status, (counts.get(status) ?? 0) + 1)
+    }
+
+    return Array.from(counts.entries()).sort((a, b) => b[1] - a[1])
+  }, [processableSelectedIds, selected])
+
+  const nonPendingSelectedCount = nonPendingSelected.reduce((n, [, count]) => n + count, 0)
 
   // Distinct companies behind the selected claims. /cms/change-script-status is
   // company-scoped, so this is what it receives.
@@ -1314,7 +1413,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
         )
       }),
       columnHelper.accessor('pendingCount', {
-        header: 'Pending',
+        header: pendingOnly ? 'Pending' : 'Claims',
         cell: ({ row }) => (
           <Chip size='small' variant='tonal' color='primary' label={row.original.pendingCount.toLocaleString('en-IN')} />
         )
@@ -1410,7 +1509,8 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
       toggleAllOnPage,
       pageAllSelected,
       pageSomeSelected,
-      pageClaims
+      pageClaims,
+      pendingOnly
     ]
   )
 
@@ -1432,7 +1532,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
     <Card>
       <CardHeader
         title='Pending CMS'
-        subheader={`Companies with pending ${platformLabel} claims, grouped by company`}
+        subheader={`Companies with ${platformLabel} ${statusLabel}, grouped by company`}
       />
       {error && (
         <div className='px-6 pb-4'>
@@ -1489,6 +1589,55 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
           >
             {SORT_OPTIONS.map(({ key, label }) => (
               <MenuItem key={key} value={key}>
+                {label}
+              </MenuItem>
+            ))}
+          </CustomTextField>
+          <CustomTextField
+            select
+            label='Status'
+            value={statuses}
+            onChange={e => {
+              const picked = e.target.value as unknown as StatusFilterKey[]
+
+              setStatuses(prev => normalizeStatusFilters(picked, prev))
+              setPage(0)
+              // Same reasoning as the platform switch: the open panels and the
+              // selection belong to claims the new filter may not return.
+              setExpanded({})
+              setSelected({})
+            }}
+            slotProps={{
+              select: {
+                multiple: true,
+                // Chips rather than the default comma-joined string — a dozen
+                // statuses joined into one line overflows the control.
+                renderValue: (value: unknown) => {
+                  const picked = value as StatusFilterKey[]
+
+                  if (!picked.length) return 'All'
+
+                  return (
+                    <div className='flex flex-wrap gap-1'>
+                      {picked.map(key => (
+                        <Chip
+                          key={key}
+                          size='small'
+                          variant='tonal'
+                          color={key === ALL_STATUSES ? 'secondary' : 'primary'}
+                          label={STATUS_FILTER_OPTIONS.find(o => o.key === key)?.label ?? key}
+                        />
+                      ))}
+                    </div>
+                  )
+                }
+              }
+            }}
+            className='max-sm:is-full sm:is-[220px]'
+          >
+            {STATUS_FILTER_OPTIONS.map(({ key, label }) => (
+              <MenuItem key={key} value={key}>
+                <Checkbox size='small' checked={statuses.includes(key)} />
                 {label}
               </MenuItem>
             ))}
@@ -1640,6 +1789,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
                       <td colSpan={row.getVisibleCells().length} className='p-0 border-bs-0'>
                         <PendingClaimsPanel
                           claims={row.original.claims}
+                          claimTotal={row.original.pendingCount}
                           credentials={row.original.credentials}
                           platform={platform}
                           companyId={row.original.companyId}
@@ -1777,6 +1927,14 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
                   <Chip size='small' variant='tonal' label={`+${selectedCompanyNames.length - 8} more`} />
                 )}
               </div>
+              {nonPendingSelectedCount > 0 && (
+                <Alert severity='warning'>
+                  {nonPendingSelectedCount.toLocaleString('en-IN')} of the selected claim
+                  {nonPendingSelectedCount === 1 ? ' is' : 's are'} not Pending (
+                  {nonPendingSelected.map(([status, count]) => `${status} · ${count}`).join(', ')}). The script runs on
+                  them all the same — deselect them if you only meant to work the pending backlog.
+                </Alert>
+              )}
               {processableSelectedIds.length > MAX_PROCESS_IDS && (
                 <Alert severity='warning'>
                   The server accepts at most {MAX_PROCESS_IDS.toLocaleString('en-IN')} claims per run. Reduce the
