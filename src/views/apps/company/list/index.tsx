@@ -213,7 +213,8 @@ const toIsoDate = (value: unknown): string => {
 const RENEW_ENDPOINTS: Partial<Record<FilterPlatformKey, string>> = {
   myntra: '/api/cms/renew-myntra-session',
   flipkart: '/api/cms/renew-flipkart-session',
-  ajio: '/api/cms/renew-ajio-session'
+  ajio: '/api/cms/renew-ajio-session',
+  snapdeal: '/api/cms/renew-snapdeal-session'
 }
 
 export const hasSession = (key: FilterPlatformKey) => key in RENEW_ENDPOINTS
@@ -225,7 +226,8 @@ export const hasSession = (key: FilterPlatformKey) => key in RENEW_ENDPOINTS
 const SESSION_FIELDS: Partial<Record<FilterPlatformKey, string>> = {
   myntra: 'myntraSession',
   flipkart: 'flipkartSession',
-  ajio: 'ajioSession'
+  ajio: 'ajioSession',
+  snapdeal: 'snapdealSession'
 }
 
 const pickSession = (acc: any, key: FilterPlatformKey): CredentialSession | null => {
@@ -1550,7 +1552,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
             <Typography color='text.primary' className='font-medium'>
               {row.original.companyName}
             </Typography>
-            <CopyableId id={row.original.companyId} label='company id' />
+            <CopyableId id={row.original.companyId} label='company id' prefix='companyId' />
+            <CopyableId id={row.original.userId} label='user id' prefix='userId' />
           </div>
         )
       }),

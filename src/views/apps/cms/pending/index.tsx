@@ -1408,7 +1408,8 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
             <Typography variant='caption' color='text.secondary'>
               {row.original.platformCredCount} account{row.original.platformCredCount === 1 ? '' : 's'} configured
             </Typography>
-            <CopyableId id={row.original.companyId} label='company id' />
+            <CopyableId id={row.original.companyId} label='company id' prefix='companyId' />
+            <CopyableId id={row.original.userId} label='user id' prefix='userId' />
           </div>
         )
       }),
