@@ -214,7 +214,13 @@ const RENEW_ENDPOINTS: Partial<Record<FilterPlatformKey, string>> = {
   myntra: '/api/cms/renew-myntra-session',
   flipkart: '/api/cms/renew-flipkart-session',
   ajio: '/api/cms/renew-ajio-session',
-  snapdeal: '/api/cms/renew-snapdeal-session'
+  snapdeal: '/api/cms/renew-snapdeal-session',
+  delhivery: '/api/cms/renew-delhivery-session',
+  // FilterPlatformKey has `xbees` (not `expressbees`) so we only key on the
+  // canonical name — the BE-side alias mapping accepts both names anyway.
+  xbees: '/api/cms/renew-xbees-session',
+  meesho: '/api/cms/renew-meesho-session',
+  nykaa: '/api/cms/renew-nykaa-session'
 }
 
 export const hasSession = (key: FilterPlatformKey) => key in RENEW_ENDPOINTS
@@ -227,7 +233,11 @@ const SESSION_FIELDS: Partial<Record<FilterPlatformKey, string>> = {
   myntra: 'myntraSession',
   flipkart: 'flipkartSession',
   ajio: 'ajioSession',
-  snapdeal: 'snapdealSession'
+  snapdeal: 'snapdealSession',
+  delhivery: 'delhiverySession',
+  xbees: 'xbeesSession',
+  meesho: 'meeshoSession',
+  nykaa: 'nykaaSession'
 }
 
 const pickSession = (acc: any, key: FilterPlatformKey): CredentialSession | null => {
