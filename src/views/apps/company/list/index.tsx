@@ -295,6 +295,28 @@ export const relativeToNow = (iso: string) => {
   return diff >= 0 ? `in ${text}` : `${text} ago`
 }
 
+// Stored spellings of a platform that are NOT the key this UI uses. The DB has
+// carried these since before the names were settled, and the BE still resolves
+// them on its own side (see resolvePlatformAlias in TrackVid-BE
+// src/constants/common.ts and the ^(xbees|expressbees|xpressbees)$ regexes in
+// the Xbees/Nykaa controllers), so a company can legitimately hold its Xbees
+// credential under "xpressbees". Matching the raw string would drop that whole
+// platform out of the panel — the credential would simply not be listed.
+const PLATFORM_ALIASES: Record<string, FilterPlatformKey> = {
+  expressbees: 'xbees',
+  xpressbees: 'xbees',
+  naykaa: 'nykaa',
+  nykaafashion: 'nykaa'
+}
+
+// "AJIO" / "myntra" / "Xpressbees" → 'ajio' / 'myntra' / 'xbees'. Returns '' for
+// a platform this UI has no key for, so it is skipped rather than matched.
+const canonicalPlatform = (value: unknown): string => {
+  const raw = String(value ?? '').toLowerCase().trim()
+
+  return PLATFORM_ALIASES[raw] ?? raw
+}
+
 // Build the per-platform credential breakdown from
 // company.settings.eCommercePlatformLoginInfo. Platform names are matched
 // case-insensitively — the DB holds "AJIO", "myntra", "snapdeal" inconsistently.
@@ -304,20 +326,25 @@ const pickCredentials = (loginInfo: any): PlatformCredentials[] => {
   // Only platforms the company actually holds a credential on, plus the four
   // sync platforms which are always listed so "not configured" stays visible
   // and distinguishable from "configured but never synced".
-  const configured = new Set(platforms.map((p: any) => String(p?.eComPlatform ?? '').toLowerCase()))
+  const configured = new Set(platforms.map((p: any) => canonicalPlatform(p?.eComPlatform)))
   const shown = PLATFORMS.filter(p => configured.has(p.key) || TRACKED_PLATFORMS.includes(p.key as PlatformKey))
 
   return shown.map(({ key, label }) => {
-    const entry = platforms.find((p: any) => String(p?.eComPlatform ?? '').toLowerCase() === key)
+    // Every entry that resolves to this key, not just the first: a company that
+    // holds both "xbees" and "xpressbees" rows would otherwise show one set of
+    // accounts and silently hide the other.
+    const entries = platforms.filter((p: any) => canonicalPlatform(p?.eComPlatform) === key)
 
-    const accounts: CredentialSync[] = (Array.isArray(entry?.info) ? entry.info : []).map((acc: any) => ({
-      credentialId: String(acc?._id ?? ''),
-      username: String(acc?.username ?? '—'),
-      password: String(acc?.password ?? ''),
-      isVerified: acc?.is_verified !== false, // undefined = legacy cred, treat as verified
-      lastSync: toIsoDate(acc?.masterDataSync),
-      session: pickSession(acc, key)
-    }))
+    const accounts: CredentialSync[] = entries
+      .flatMap((entry: any) => (Array.isArray(entry?.info) ? entry.info : []))
+      .map((acc: any) => ({
+        credentialId: String(acc?._id ?? ''),
+        username: String(acc?.username ?? '—'),
+        password: String(acc?.password ?? ''),
+        isVerified: acc?.is_verified !== false, // undefined = legacy cred, treat as verified
+        lastSync: toIsoDate(acc?.masterDataSync),
+        session: pickSession(acc, key)
+      }))
 
     return { key, label, accounts }
   })
@@ -513,6 +540,14 @@ export const CredentialSyncPanel = ({
           severity: 'error',
           message: json?.displayMessage || json?.message || `Renewal failed (${res.status})`
         })
+
+        // The BE flips is_verified=false when the portal actually rejected the
+        // password (never on a timeout or bot-block — see
+        // TrackVid-BE/src/utils/credentialVerification.ts). Refetch so the row
+        // switches to Unverified now: that chip is the reason the sync jobs
+        // will start skipping this account, and leaving it stale would have the
+        // panel showing Verified for a credential the DB has already retired.
+        if (json?.data?.credentialUnverified) onRenewed()
 
         return
       }

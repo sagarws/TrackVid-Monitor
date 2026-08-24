@@ -1080,6 +1080,13 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
             message: json?.displayMessage || json?.message || `Renewal failed (${res.status})`
           })
 
+          // A rejected password leaves the BE having flipped is_verified=false
+          // (never on a timeout or bot-block — see
+          // TrackVid-BE/src/utils/credentialVerification.ts). Refetch so the
+          // Verified column stops advertising a credential the automation will
+          // now skip.
+          if (json?.data?.credentialUnverified) fetchRows()
+
           return
         }
 
