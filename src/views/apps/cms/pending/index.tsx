@@ -39,6 +39,8 @@ import type { PlatformKey } from '@/configs/platforms'
 
 // Component Imports
 import AccountCountFilter, { useAccountFilter } from '@/components/AccountCountFilter'
+import CompanyFilter, { useCompanyFilter } from '@/components/CompanyFilter'
+import StarCompanyButton from '@/components/StarCompanyButton'
 import CopyableId from '@/components/CopyableId'
 import CustomTextField from '@core/components/mui/TextField'
 
@@ -780,6 +782,15 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   // the platform cannot have its claims dispatched at all, so those rows are
   // noise on first load and are opted into rather than out of.
   const account = useAccountFilter({ initial: ['nonZero'], onChange: () => setPage(0) })
+
+  // Explicit company multi-select, resolved server-side via `companyIds`. Its
+  // own storage key, so narrowing this report to a few companies does not also
+  // narrow the Company list (and the other way round) — the two pages are
+  // worked separately.
+  const companyFilter = useCompanyFilter({
+    storageKey: 'trackvid-monitor.cms-pending.companies',
+    onChange: () => setPage(0)
+  })
   // Survives navigation — see usePersistedSearch.
   const [search, setSearch] = usePersistedSearch('trackvid-monitor.cms-pending.search')
   const [debouncedSearch, setDebouncedSearch] = useState('')
@@ -877,7 +888,8 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
           eCommercePlatform: platform,
           sort,
           statuses,
-          ...(account.payload ? { accountFilter: account.payload } : {})
+          ...(account.payload ? { accountFilter: account.payload } : {}),
+          ...(companyFilter.companyIds.length ? { companyIds: companyFilter.companyIds } : {})
         })
       })
 
@@ -909,7 +921,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
       if (reqId === reqIdRef.current) setLoading(false)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, debouncedSearch, platform, sort, statusesKey, account.payloadKey])
+  }, [page, pageSize, debouncedSearch, platform, sort, statusesKey, account.payloadKey, companyFilter.companyIdsKey])
 
   useEffect(() => {
     fetchRows()
@@ -1377,6 +1389,13 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
         }
       },
       {
+        // Same shortlist the Company list writes — see useStarredCompanies.
+        id: 'starred',
+        header: () => null,
+        enableSorting: false,
+        cell: ({ row }) => <StarCompanyButton companyId={row.original.companyId} />
+      },
+      {
         id: 'expander',
         header: () => null,
         enableSorting: false,
@@ -1541,6 +1560,10 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
       <CardHeader
         title='Pending CMS'
         subheader={`Companies with ${platformLabel} ${statusLabel}, grouped by company`}
+        // Same placement as the Company list: this scopes the whole report to a
+        // chosen set of companies rather than filtering one column of it.
+        action={<CompanyFilter {...companyFilter} className='max-sm:is-full sm:is-[440px]' />}
+        slotProps={{ action: { className: 'max-sm:is-full self-center m-0' } }}
       />
       {error && (
         <div className='px-6 pb-4'>
@@ -1661,7 +1684,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
             ) : (
               <Typography
                 variant='body2'
-                color={account.payload ? 'primary.main' : 'text.primary'}
+                color={account.payload || companyFilter.companyIds.length ? 'primary.main' : 'text.primary'}
                 className='font-medium tabular-nums'
               >
                 {total.toLocaleString('en-IN')}
@@ -1669,7 +1692,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
             )}
             <Typography variant='body2' color='text.secondary'>
               {total === 1 ? 'company' : 'companies'}
-              {account.payload ? ' found' : ''}
+              {account.payload || companyFilter.companyIds.length ? ' found' : ''}
               {!loading && pageClaimTotal > 0 ? ` • ${pageClaimTotal.toLocaleString('en-IN')} claims on this page` : ''}
             </Typography>
           </div>

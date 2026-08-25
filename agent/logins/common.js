@@ -19,12 +19,27 @@ async function typeInto(page, selector, value, { delay = 60, timeout = 30000 } =
 
 // Click the first visible element whose trimmed text matches. Used where the
 // portals give their buttons no stable id.
-async function clickByText(page, text, { tags = 'a,button,div,span' } = {}) {
+//
+// exact:false falls back to a case-insensitive "contains" once no exact match
+// is found — Snapdeal wraps its button labels in extra whitespace and nested
+// spans, which the automation tolerates via Puppeteer's ::-p-text().
+async function clickByText(page, text, { tags = 'a,button,div,span', exact = true } = {}) {
   return page.evaluate(
-    (needle, tagList) => {
-      const el = Array.from(document.querySelectorAll(tagList)).find(
-        node => node.offsetParent !== null && (node.textContent || '').replace(/\s+/g, ' ').trim() === needle
-      )
+    (needle, tagList, exactMatch) => {
+      const nodes = Array.from(document.querySelectorAll(tagList)).filter(node => node.offsetParent !== null)
+      const label = node => (node.textContent || '').replace(/\s+/g, ' ').trim()
+
+      let el = nodes.find(node => label(node) === needle)
+
+      if (!el && !exactMatch) {
+        const lowered = needle.toLowerCase()
+
+        // Shortest match wins: on nested markup the ancestors carry the same
+        // text, and clicking the innermost element is what a human does.
+        el = nodes
+          .filter(node => label(node).toLowerCase().includes(lowered))
+          .sort((a, b) => label(a).length - label(b).length)[0]
+      }
 
       if (el) {
         el.click()
@@ -35,7 +50,8 @@ async function clickByText(page, text, { tags = 'a,button,div,span' } = {}) {
       return false
     },
     text,
-    tags
+    tags,
+    exact
   )
 }
 

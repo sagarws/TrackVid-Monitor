@@ -65,6 +65,8 @@ import AppReactDatepicker from '@/libs/styles/AppReactDatepicker'
 
 // Component Imports
 import AccountCountFilter, { useAccountFilter } from '@/components/AccountCountFilter'
+import CompanyFilter, { useCompanyFilter } from '@/components/CompanyFilter'
+import StarCompanyButton from '@/components/StarCompanyButton'
 import CopyableId from '@/components/CopyableId'
 import CopyButton from '@/components/CopyButton'
 import SessionJsonDialog from '@/components/SessionJsonDialog'
@@ -971,6 +973,15 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   // a surprise — unlike Pending CMS, where they cannot be actioned at all.
   const account = useAccountFilter({ onChange: () => setPage(0) })
 
+  // Explicit company multi-select. Separate from the search box on purpose:
+  // search is one substring across name/admin/email/phone, this is "these exact
+  // companies and nothing else", which is what ops wants when working a known
+  // set. Resolved server-side via `companyIds` — see CompanyFilter.
+  const companyFilter = useCompanyFilter({
+    storageKey: 'trackvid-monitor.company-list.companies',
+    onChange: () => setPage(0)
+  })
+
   // ── Local agent ─────────────────────────────────────────────────────────
   // Probed once on mount. null = still checking, so the button can say so
   // rather than claiming the agent is down while the request is in flight.
@@ -1146,6 +1157,11 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     return filterUsingMdYes ? 'yes' : 'no'
   }, [filterUsingMdYes, filterUsingMdNo])
 
+  // True when the table is scoped to a hand-picked set of companies. Tracked
+  // apart from activeFilterCount because that number is the Filter popover's
+  // badge, and the company filter is not one of its controls.
+  const companyScoped = companyFilter.companyIds.length > 0
+
   const activeFilterCount =
     selectedPlatforms.length +
     (filterNoCredentials ? 1 : 0) +
@@ -1229,6 +1245,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
           ...(masterDataSynced ? { masterDataSynced } : {}),
           ...(isUsingMasterData ? { isUsingMasterData } : {}),
           ...(account.payload ? { accountFilter: account.payload } : {}),
+          ...(companyFilter.companyIds.length ? { companyIds: companyFilter.companyIds } : {}),
           // Omitted unless a usage column is actually sorted — it costs the BE
           // a join across every matched company.
           ...(usageSort ? { usageSort: { field: usageSort.field, direction: usageSort.dir, date: usageDay } } : {})
@@ -1272,6 +1289,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     masterDataSynced,
     isUsingMasterData,
     account.payloadKey,
+    companyFilter.companyIdsKey,
     usageSort,
     // Only when a usage sort is on: moving the day then reorders the list, so
     // the rows have to be re-fetched. Without a sort the day only changes what
@@ -1620,6 +1638,15 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
         enableSorting: false
       },
       {
+        // Personal shortlist, kept in localStorage — see useStarredCompanies.
+        // Sits between the select checkbox and the expander so the two
+        // per-row controls stay together at the head of the row.
+        id: 'starred',
+        header: () => null,
+        enableSorting: false,
+        cell: ({ row }) => <StarCompanyButton companyId={row.original.companyId} />
+      },
+      {
         id: 'expander',
         header: () => null,
         enableSorting: false,
@@ -1861,7 +1888,14 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
 
   return (
     <Card>
-      <CardHeader title='Companies' />
+      <CardHeader
+        title='Companies'
+        // In the header rather than the toolbar below: this narrows the whole
+        // table to a chosen set, so it reads as scope for the page rather than
+        // as one more control in the row of filters.
+        action={<CompanyFilter {...companyFilter} className='max-sm:is-full sm:is-[440px]' />}
+        slotProps={{ action: { className: 'max-sm:is-full self-center m-0' } }}
+      />
       {error && (
         <div className='px-6 pb-4'>
           <Alert severity='error'>{error}</Alert>
@@ -1910,7 +1944,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
             ) : (
               <Typography
                 variant='body2'
-                color={activeFilterCount ? 'primary.main' : 'text.primary'}
+                color={activeFilterCount || companyScoped ? 'primary.main' : 'text.primary'}
                 className='font-medium tabular-nums'
               >
                 {total.toLocaleString('en-IN')}
@@ -1918,7 +1952,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
             )}
             <Typography variant='body2' color='text.secondary'>
               {total === 1 ? 'company' : 'companies'}
-              {activeFilterCount ? ' found' : ''}
+              {activeFilterCount || companyScoped ? ' found' : ''}
             </Typography>
           </div>
           {/* Which day the usage columns are reporting. Visible without opening
