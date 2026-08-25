@@ -67,6 +67,7 @@ import AppReactDatepicker from '@/libs/styles/AppReactDatepicker'
 import AccountCountFilter, { useAccountFilter } from '@/components/AccountCountFilter'
 import CopyableId from '@/components/CopyableId'
 import CopyButton from '@/components/CopyButton'
+import SessionJsonDialog from '@/components/SessionJsonDialog'
 import FilterCheck from '@/components/FilterCheck'
 import CustomTextField from '@core/components/mui/TextField'
 
@@ -507,6 +508,17 @@ export const CredentialSyncPanel = ({
   const toggleReveal = (credentialId: string) =>
     setRevealed(prev => ({ ...prev, [credentialId]: !prev[credentialId] }))
 
+  // The credential whose stored session JSON is open in the dialog; null =
+  // closed. Held as the identifying triple rather than the jar itself — the jar
+  // is fetched by the dialog on open and dropped on close, so a panel sitting
+  // behind a closed dialog is never holding live cookies.
+  const [viewing, setViewing] = useState<{
+    platform: FilterPlatformKey
+    label: string
+    credentialId: string
+    username: string
+  } | null>(null)
+
   // credentialIds with a renewal in flight. Owned here rather than by the host
   // page because both pages that render this panel would otherwise carry the
   // same state and the same fetch — the button is only ever pressed from here.
@@ -578,10 +590,11 @@ export const CredentialSyncPanel = ({
   }
 
   return (
-  // A real table rather than stacked flex rows: the account and its timestamp
-  // belong in aligned columns, otherwise they drift to opposite edges of a wide
-  // viewport and stop reading as a pair. Platform is a rowSpan cell so each
-  // marketplace reads as one block.
+  <>
+  {/* A real table rather than stacked flex rows: the account and its timestamp
+      belong in aligned columns, otherwise they drift to opposite edges of a wide
+      viewport and stop reading as a pair. Platform is a rowSpan cell so each
+      marketplace reads as one block. */}
   <div className='bg-actionHover plb-4 pli-6 border-bs'>
     <div className='overflow-x-auto rounded border'>
       <table className={tableStyles.table}>
@@ -589,7 +602,9 @@ export const CredentialSyncPanel = ({
           <tr>
             <th className='is-[160px]'>Platform</th>
             <th>Account</th>
-            <th className='is-[240px]'>Session</th>
+            {/* Wider than it reads: the cell carries a chip, a Renew button,
+                and the JSON button, which wrapped at 240px. */}
+            <th className='is-[290px]'>Session</th>
             <th className='is-[120px]'>Status</th>
             <th className='is-[200px]'>Last sync</th>
             <th className='is-[80px] text-center'>Sync</th>
@@ -724,6 +739,36 @@ export const CredentialSyncPanel = ({
                             </Button>
                           </span>
                         </Tooltip>
+                        {/* Reads the jar itself, which the list response never
+                            carries — the chip beside it only knows the expiry.
+                            Shown whatever the chip says: a session that reads
+                            Expired, or one whose cookies are incomplete, is
+                            exactly the one worth opening. */}
+                        <Tooltip
+                          title={
+                            acc.credentialId
+                              ? `View the stored ${label} session JSON for this account`
+                              : 'Credential has no id — cannot look up its session'
+                          }
+                        >
+                          <span>
+                            <IconButton
+                              size='small'
+                              disabled={!acc.credentialId || !companyId}
+                              onClick={() =>
+                                setViewing({
+                                  platform: key,
+                                  label,
+                                  credentialId: acc.credentialId,
+                                  username: acc.username
+                                })
+                              }
+                              aria-label={`View ${label} session JSON for ${acc.username}`}
+                            >
+                              <i className='tabler-code text-base' />
+                            </IconButton>
+                          </span>
+                        </Tooltip>
                       </div>
                     ) : (
                       <Typography variant='body2' color='text.disabled'>
@@ -810,6 +855,20 @@ export const CredentialSyncPanel = ({
       </table>
     </div>
   </div>
+  {/* One dialog for the whole panel rather than one per row: only one session
+      is ever open, and a Dialog per credential would mount dozens of them. */}
+  {viewing && (
+    <SessionJsonDialog
+      open
+      onClose={() => setViewing(null)}
+      companyId={companyId}
+      platform={viewing.platform}
+      platformLabel={viewing.label}
+      credentialId={viewing.credentialId}
+      username={viewing.username}
+    />
+  )}
+  </>
   )
 }
 
