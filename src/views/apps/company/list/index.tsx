@@ -29,6 +29,7 @@ import Popover from '@mui/material/Popover'
 import Divider from '@mui/material/Divider'
 import Badge from '@mui/material/Badge'
 import Chip from '@mui/material/Chip'
+import Switch from '@mui/material/Switch'
 
 // Third-party Imports
 import classnames from 'classnames'
@@ -91,13 +92,17 @@ export type CredentialSync = {
   // Cached login session, on the three platforms that keep one. null on every
   // other platform, and on an account that has never had a jar harvested.
   session: CredentialSession | null
-  // AJIO POB parent ids stored on the credential by the POBs button. Empty on
-  // every other platform, and on an AJIO account that has never been synced.
-  //
-  // NOT the same list as the session's own pobIds (store-level ids used for
-  // report downloads) — see TrackVid-BE company.model.ts.
+  // AJIO POB ids stored on the credential by the POBs button — one per POB.
+  // Empty on every other platform, and on an AJIO account that has never been
+  // synced. Rows synced before 2026-08-26 hold a single parent id instead; a
+  // re-sync replaces them. See TrackVid-BE company.model.ts.
   pobIds: string[]
   pobSyncedAt: string // ISO string, '' when never synced
+  // AJIO only: whether this seller account is an enterprise-level login, which
+  // changes which AJIO portal APIs the runner is allowed to call. Stored on the
+  // credential as `IsEnterPriceLevel` (BE's spelling — kept verbatim on the
+  // wire, normalised to this camelCase field here). Absent = false.
+  isEnterpriseLevel: boolean
 }
 
 // Metadata for a cached marketplace cookie jar, as the BE projects it onto the
@@ -370,7 +375,10 @@ const pickCredentials = (loginInfo: any): PlatformCredentials[] => {
         lastSync: toIsoDate(acc?.masterDataSync),
         session: pickSession(acc, key),
         pobIds: Array.isArray(acc?.pobIds) ? acc.pobIds.map((p: unknown) => String(p ?? '')).filter(Boolean) : [],
-        pobSyncedAt: toIsoDate(acc?.pobSyncedAt)
+        pobSyncedAt: toIsoDate(acc?.pobSyncedAt),
+        // Strict true: the field is absent on every credential written before
+        // it existed, and "not set" means the standard (non-enterprise) login.
+        isEnterpriseLevel: acc?.IsEnterPriceLevel === true
       }))
 
     return { key, label, accounts }
@@ -555,8 +563,109 @@ export const CredentialSyncPanel = ({
   // different cost and one should not disable the other.
   const [syncingPobs, setSyncingPobs] = useState<Set<string>>(new Set())
 
+  // credentialId → the enterprise-level value this panel has written but has not
+  // seen come back yet. Holds the value rather than a plain busy flag so the
+  // switch sits where it is going instead of snapping back for the length of the
+  // write plus the refetch behind it, then flipping again when the row reloads.
+  const [pendingEnterprise, setPendingEnterprise] = useState<Record<string, boolean>>({})
+
+  // credentialIds with an enterprise-level write in flight, so the switch cannot
+  // be clicked a second time into a race with its own response.
+  const [savingEnterprise, setSavingEnterprise] = useState<Set<string>>(new Set())
+
+  // Drop the optimistic value once the reloaded credential agrees with it —
+  // anything left over would be this panel asserting a state the DB has not
+  // confirmed.
+  useEffect(() => {
+    setPendingEnterprise(prev => {
+      if (Object.keys(prev).length === 0) return prev
+
+      const next = { ...prev }
+      let changed = false
+
+      for (const platform of credentials) {
+        for (const acc of platform.accounts) {
+          if (acc.credentialId in next && next[acc.credentialId] === acc.isEnterpriseLevel) {
+            delete next[acc.credentialId]
+            changed = true
+          }
+        }
+      }
+
+      return changed ? next : prev
+    })
+  }, [credentials])
+
   /**
-   * Resolve the POB parent ids this AJIO credential can see and store them on
+   * Flip `IsEnterPriceLevel` on one AJIO credential. Enterprise accounts sit on
+   * a different set of AJIO portal APIs, and nothing in the login response says
+   * which kind an account is — it is an operator-set fact, hence a toggle rather
+   * than something the sync job could infer.
+   */
+  const setEnterpriseLevel = async (acc: CredentialSync, next: boolean) => {
+    if (!acc.credentialId || !companyId) return
+
+    setSavingEnterprise(prev => new Set(prev).add(acc.credentialId))
+    setPendingEnterprise(prev => ({ ...prev, [acc.credentialId]: next }))
+
+    try {
+      const res = await fetch('/api/cms/set-ajio-enterprise-level', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyId, credentialId: acc.credentialId, isEnterPriceLevel: next })
+      })
+
+      const json = await res.json().catch(() => null)
+
+      if (!res.ok || !json?.isSuccess) {
+        onToast({
+          severity: 'error',
+          message: json?.displayMessage || json?.message || `Update failed (${res.status})`
+        })
+
+        // Nothing was written — put the switch back where the DB still has it.
+        setPendingEnterprise(prev => {
+          const rest = { ...prev }
+
+          delete rest[acc.credentialId]
+
+          return rest
+        })
+
+        return
+      }
+
+      onToast({
+        severity: 'success',
+        message: `${acc.username} marked ${next ? 'enterprise-level' : 'standard'}`
+      })
+
+      // Refetch for the same reason POB sync does: the same seller account can
+      // be configured under another company, and the flag is written per
+      // credential document.
+      onRenewed()
+    } catch (err: any) {
+      onToast({ severity: 'error', message: err?.message || 'Update request failed' })
+      setPendingEnterprise(prev => {
+        const rest = { ...prev }
+
+        delete rest[acc.credentialId]
+
+        return rest
+      })
+    } finally {
+      setSavingEnterprise(prev => {
+        const rest = new Set(prev)
+
+        rest.delete(acc.credentialId)
+
+        return rest
+      })
+    }
+  }
+
+  /**
+   * Resolve the POB ids this AJIO credential can see and store them on
    * it. AJIO only — no other marketplace has the concept.
    *
    * Reuses the credential's cached session rather than logging in, so this is a
@@ -691,8 +800,10 @@ export const CredentialSyncPanel = ({
             <th className='is-[160px]'>Platform</th>
             <th>Account</th>
             {/* Wider than it reads: the cell carries a chip, a Renew button,
-                and the JSON button, which wrapped at 240px. */}
-            <th className='is-[290px]'>Session</th>
+                and the JSON button, which wrapped at 240px — plus the POBs
+                button and the Enterprise switch on AJIO, which is the row that
+                sets the width. */}
+            <th className='is-[380px]'>Session</th>
             <th className='is-[120px]'>Status</th>
             <th className='is-[200px]'>Last sync</th>
             <th className='is-[80px] text-center'>Sync</th>
@@ -726,6 +837,11 @@ export const CredentialSyncPanel = ({
               const renewingThis = renewing.has(acc.credentialId)
               const syncingPobsThis = syncingPobs.has(acc.credentialId)
               const state = sessionState(acc.session)
+
+              // The optimistic value wins while a write is unconfirmed; the
+              // stored one otherwise.
+              const enterpriseLevel = pendingEnterprise[acc.credentialId] ?? acc.isEnterpriseLevel
+              const savingEnterpriseThis = savingEnterprise.has(acc.credentialId)
 
               return (
                 <tr key={acc.credentialId || `${key}-${acc.username}`}>
@@ -792,7 +908,7 @@ export const CredentialSyncPanel = ({
                       there would only ever 400. */}
                   <td>
                     {hasSession(key) ? (
-                      <div className='flex items-center gap-2'>
+                      <div className='flex items-center flex-wrap gap-2'>
                         <Tooltip
                           title={
                             acc.session ? describeSession(acc.session) : 'No cookie jar stored for this account'
@@ -863,6 +979,7 @@ export const CredentialSyncPanel = ({
                             reuses the session rather than logging in, and 409s
                             asking for a Renew when there is nothing to reuse. */}
                         {key === 'ajio' && (
+                          <>
                           <Tooltip
                             title={
                               syncingPobsThis
@@ -910,6 +1027,46 @@ export const CredentialSyncPanel = ({
                               </Button>
                             </span>
                           </Tooltip>
+                          {/* Enterprise-level is an operator-set fact about the
+                              seller account — AJIO's login response does not
+                              report it — so it is a switch rather than something
+                              a sync could fill in. Writes on click; there is no
+                              Save button because there is nothing else on the
+                              row to save with it. */}
+                          <Tooltip
+                            title={
+                              !acc.credentialId
+                                ? 'Credential has no id — cannot change this flag'
+                                : savingEnterpriseThis
+                                  ? 'Saving…'
+                                  : enterpriseLevel
+                                    ? 'Enterprise-level AJIO account (IsEnterPriceLevel: true) — click to mark it standard'
+                                    : 'Standard AJIO account (IsEnterPriceLevel: false) — click to mark it enterprise-level'
+                            }
+                          >
+                            <span>
+                              <FormControlLabel
+                                className='mie-0'
+                                disabled={savingEnterpriseThis || !acc.credentialId || !companyId}
+                                control={
+                                  <Switch
+                                    size='small'
+                                    checked={enterpriseLevel}
+                                    onChange={e => setEnterpriseLevel(acc, e.target.checked)}
+                                    slotProps={{
+                                      input: { 'aria-label': `Enterprise level for ${acc.username}` }
+                                    }}
+                                  />
+                                }
+                                label={
+                                  <Typography variant='caption' color='text.secondary' className='whitespace-nowrap'>
+                                    Enterprise
+                                  </Typography>
+                                }
+                              />
+                            </span>
+                          </Tooltip>
+                          </>
                         )}
                       </div>
                     ) : (

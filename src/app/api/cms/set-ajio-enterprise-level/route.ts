@@ -1,21 +1,16 @@
-// Proxy for the credentials panel's AJIO "POBs" button. Forwards
-// { companyId, credentialId } to POST {TRACKVID_API_URL}/system-admin/ajio/sync-pobs,
-// which asks Automated-scripts to page through whichever POB API the account is
-// entitled to (pobsFromUserId when its IsEnterPriceLevel is true, work-places
-// otherwise) using the credential's cached session, and then stores one id per
-// POB on that credential.
+// Proxy for the credentials panel's AJIO "Enterprise" switch. Forwards
+// { companyId, credentialId, isEnterPriceLevel } to
+// POST {TRACKVID_API_URL}/system-admin/ajio/set-enterprise-level, which writes
+// `IsEnterPriceLevel` on that one credential inside
+// company.settings.eCommercePlatformLoginInfo[].info[].
 //
-// Unlike renew-session this does NOT run a login: the runner reuses the cached
-// jar and answers 409 (NO_SESSION / SESSION_EXPIRED) when there is nothing to
-// reuse. So it returns in seconds, and a short maxDuration is enough — the BE's
-// own ceiling is 90s.
+// A plain DB write — no marketplace call — so the default route timeout is
+// ample and no maxDuration override is needed here.
 
 import { NextResponse } from 'next/server'
 import { getServerSession } from 'next-auth'
 
 import { authOptions } from '@/libs/auth'
-
-export const maxDuration = 120
 
 export async function POST(req: Request) {
   const session = await getServerSession(authOptions)
@@ -36,7 +31,7 @@ export async function POST(req: Request) {
 
   const body = await req.json().catch(() => ({}))
 
-  const res = await fetch(`${apiBase.replace(/\/$/, '')}/system-admin/ajio/sync-pobs`, {
+  const res = await fetch(`${apiBase.replace(/\/$/, '')}/system-admin/ajio/set-enterprise-level`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
