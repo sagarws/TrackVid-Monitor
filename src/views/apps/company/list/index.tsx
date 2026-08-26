@@ -91,6 +91,13 @@ export type CredentialSync = {
   // Cached login session, on the three platforms that keep one. null on every
   // other platform, and on an account that has never had a jar harvested.
   session: CredentialSession | null
+  // AJIO POB parent ids stored on the credential by the POBs button. Empty on
+  // every other platform, and on an AJIO account that has never been synced.
+  //
+  // NOT the same list as the session's own pobIds (store-level ids used for
+  // report downloads) — see TrackVid-BE company.model.ts.
+  pobIds: string[]
+  pobSyncedAt: string // ISO string, '' when never synced
 }
 
 // Metadata for a cached marketplace cookie jar, as the BE projects it onto the
@@ -284,6 +291,21 @@ const describeSession = (session: CredentialSession) => {
   return parts.join(' · ') || 'Session stored, but with no expiry recorded'
 }
 
+// Tooltip for the AJIO POBs button. Absolute timestamp first — that is what an
+// operator compares against a claim or an import run — then relative, which is
+// what tells them whether the list is stale enough to re-read.
+const describePobSync = (pobIds: string[], pobSyncedAt: string) => {
+  if (pobIds.length === 0) {
+    return 'No POB IDs stored for this account yet — click to read them from AJIO'
+  }
+
+  const when = pobSyncedAt
+    ? `Synced ${formatSyncDate(pobSyncedAt)} (${relativeToNow(pobSyncedAt)})`
+    : 'Sync time not recorded'
+
+  return `${pobIds.length} POB ID${pobIds.length === 1 ? '' : 's'}: ${pobIds.join(', ')} · ${when} · Click to re-read from AJIO`
+}
+
 // "in 42m" / "2h ago" — the number ops actually reads off an expiry.
 export const relativeToNow = (iso: string) => {
   if (!iso) return ''
@@ -346,7 +368,9 @@ const pickCredentials = (loginInfo: any): PlatformCredentials[] => {
         password: String(acc?.password ?? ''),
         isVerified: acc?.is_verified !== false, // undefined = legacy cred, treat as verified
         lastSync: toIsoDate(acc?.masterDataSync),
-        session: pickSession(acc, key)
+        session: pickSession(acc, key),
+        pobIds: Array.isArray(acc?.pobIds) ? acc.pobIds.map((p: unknown) => String(p ?? '')).filter(Boolean) : [],
+        pobSyncedAt: toIsoDate(acc?.pobSyncedAt)
       }))
 
     return { key, label, accounts }
@@ -526,6 +550,68 @@ export const CredentialSyncPanel = ({
   // same state and the same fetch — the button is only ever pressed from here.
   const [renewing, setRenewing] = useState<Set<string>>(new Set())
 
+  // credentialIds with a POB sync in flight. Separate from `renewing` so the
+  // two buttons spin independently — they are different operations of very
+  // different cost and one should not disable the other.
+  const [syncingPobs, setSyncingPobs] = useState<Set<string>>(new Set())
+
+  /**
+   * Resolve the POB parent ids this AJIO credential can see and store them on
+   * it. AJIO only — no other marketplace has the concept.
+   *
+   * Reuses the credential's cached session rather than logging in, so this is a
+   * seconds-long call. When there is no usable jar the BE answers with the
+   * runner's own message ("press Renew first"), which is the actionable one, so
+   * it is surfaced verbatim rather than flattened into a generic failure.
+   */
+  const syncPobs = async (acc: CredentialSync) => {
+    if (!acc.credentialId || !companyId) return
+
+    setSyncingPobs(prev => new Set(prev).add(acc.credentialId))
+    onToast({ severity: 'info', message: `Reading AJIO POBs for ${acc.username}…` })
+
+    try {
+      const res = await fetch('/api/cms/sync-ajio-pobs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyId, credentialId: acc.credentialId })
+      })
+
+      const json = await res.json().catch(() => null)
+
+      if (!res.ok || !json?.isSuccess) {
+        onToast({
+          severity: 'error',
+          message: json?.displayMessage || json?.message || `POB sync failed (${res.status})`
+        })
+
+        return
+      }
+
+      const count = Array.isArray(json.data?.pobIds) ? json.data.pobIds.length : 0
+
+      onToast({
+        severity: count > 0 ? 'success' : 'warning',
+        message: json?.displayMessage || `Synced ${count} POB ID(s) for ${acc.username}`
+      })
+
+      // Refetch so the stored count on the row reflects what was just written —
+      // and so a sibling company configured with the same seller account picks
+      // it up too.
+      onRenewed()
+    } catch (err: any) {
+      onToast({ severity: 'error', message: err?.message || 'POB sync request failed' })
+    } finally {
+      setSyncingPobs(prev => {
+        const next = new Set(prev)
+
+        next.delete(acc.credentialId)
+
+        return next
+      })
+    }
+  }
+
   // Force a fresh login for one credential and cache the jar it harvests. The
   // request blocks for the whole login (~30-60s, longer when the account trips
   // a bot check), so the row spins for the duration instead of the page going
@@ -638,6 +724,7 @@ export const CredentialSyncPanel = ({
               const busy = inFlight.has(`${companyId}:${key}:${acc.credentialId}`)
               const openingThis = opening.has(`${key}:${acc.username}`)
               const renewingThis = renewing.has(acc.credentialId)
+              const syncingPobsThis = syncingPobs.has(acc.credentialId)
               const state = sessionState(acc.session)
 
               return (
@@ -771,6 +858,59 @@ export const CredentialSyncPanel = ({
                             </IconButton>
                           </span>
                         </Tooltip>
+                        {/* AJIO only — no other marketplace has POBs. Sits with
+                            Renew because it depends on the same cached jar: it
+                            reuses the session rather than logging in, and 409s
+                            asking for a Renew when there is nothing to reuse. */}
+                        {key === 'ajio' && (
+                          <Tooltip
+                            title={
+                              syncingPobsThis
+                                ? 'Reading POBs from AJIO…'
+                                : !acc.credentialId
+                                  ? 'Credential has no id — cannot sync POBs'
+                                  : describePobSync(acc.pobIds, acc.pobSyncedAt)
+                            }
+                          >
+                            <span>
+                              <Button
+                                size='small'
+                                variant='tonal'
+                                // Green when this credential already carries POB
+                                // ids, red when it does not — the one thing an
+                                // operator scanning a column of accounts needs
+                                // to spot is which ones were never synced.
+                                // Neutral while a sync is running so the colour
+                                // is never asserting a state we are mid-way
+                                // through changing.
+                                color={
+                                  syncingPobsThis ? 'secondary' : acc.pobIds.length > 0 ? 'success' : 'error'
+                                }
+                                disabled={syncingPobsThis || !acc.credentialId || !companyId}
+                                startIcon={
+                                  syncingPobsThis ? (
+                                    <CircularProgress size={14} color='inherit' />
+                                  ) : acc.pobIds.length > 0 ? (
+                                    <i className='tabler-circle-check' />
+                                  ) : (
+                                    <i className='tabler-alert-circle' />
+                                  )
+                                }
+                                onClick={() => syncPobs(acc)}
+                              >
+                                {/* The count is the whole point of the button
+                                    having a label — it turns "did that work?"
+                                    into something readable at a glance after
+                                    the toast has gone. */}
+                                {syncingPobsThis
+                                  ? 'Syncing'
+                                  : acc.pobIds.length > 0
+                                    ? `POBs (${acc.pobIds.length})`
+                                    : 'POBs'}
+                              </Button>
+                            </span>
+                          </Tooltip>
+                        )}
                       </div>
                     ) : (
                       <Typography variant='body2' color='text.disabled'>
@@ -1360,6 +1500,105 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     () => Object.entries(selected).filter(([, v]) => v).map(([k]) => k),
     [selected]
   )
+
+  // ── Bulk POB sync ───────────────────────────────────────────────────────
+  // Every AJIO credential across the selected companies, flattened to the
+  // triple the sync endpoint needs. Built from `rows`, so it only ever covers
+  // companies actually on screen — a selection carried across a page change
+  // would otherwise silently sync accounts the operator can no longer see.
+  const selectedAjioAccounts = useMemo(() => {
+    const out: { companyId: string; companyName: string; credentialId: string; username: string }[] = []
+
+    for (const row of rows) {
+      if (!selected[row.companyId]) continue
+
+      const ajio = row.credentials.find(c => c.key === 'ajio')
+
+      for (const acc of ajio?.accounts ?? []) {
+        if (!acc.credentialId) continue
+        out.push({
+          companyId: row.companyId,
+          companyName: row.companyName,
+          credentialId: acc.credentialId,
+          username: acc.username
+        })
+      }
+    }
+
+    return out
+  }, [rows, selected])
+
+  const [pobBulkOpen, setPobBulkOpen] = useState(false)
+  const [pobBulkRunning, setPobBulkRunning] = useState(false)
+  const [pobBulkResults, setPobBulkResults] = useState<
+    { companyName: string; username: string; ok: boolean; detail: string }[]
+  >([])
+
+  // Set on cancel/close so an in-flight run stops after the account it is on
+  // rather than continuing invisibly against a closed dialog.
+  const pobBulkAbort = useRef(false)
+
+  /**
+   * Sync POBs for every AJIO account in the selection, one at a time.
+   *
+   * Sequential on purpose: each call launches a Chrome on the automation host,
+   * which caps itself at AJIO_LOGIN_MAX_CONCURRENT (2). Firing the whole
+   * selection at once would just collect 429s for everything past the cap, and
+   * the operator would have to work out which ones actually ran.
+   */
+  const runBulkPobSync = async () => {
+    pobBulkAbort.current = false
+    setPobBulkRunning(true)
+    setPobBulkResults([])
+
+    for (const acc of selectedAjioAccounts) {
+      if (pobBulkAbort.current) break
+
+      try {
+        const res = await fetch('/api/cms/sync-ajio-pobs', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ companyId: acc.companyId, credentialId: acc.credentialId })
+        })
+
+        const json = await res.json().catch(() => null)
+        const count = Array.isArray(json?.data?.pobIds) ? json.data.pobIds.length : 0
+
+        setPobBulkResults(prev => [
+          ...prev,
+          {
+            companyName: acc.companyName,
+            username: acc.username,
+            // A 200 that stored nothing is not a success worth a green tick —
+            // the BE deliberately leaves the row untouched on an empty sweep,
+            // so the account still has no POBs and the operator needs to know.
+            ok: !!json?.isSuccess && count > 0,
+            detail:
+              res.ok && json?.isSuccess
+                ? count > 0
+                  ? `${count} POB ID${count === 1 ? '' : 's'} stored`
+                  : json?.displayMessage || 'AJIO returned no POBs — nothing changed'
+                : json?.displayMessage || json?.message || `Failed (${res.status})`
+          }
+        ])
+      } catch (err: any) {
+        setPobBulkResults(prev => [
+          ...prev,
+          {
+            companyName: acc.companyName,
+            username: acc.username,
+            ok: false,
+            detail: err?.message || 'Request failed'
+          }
+        ])
+      }
+    }
+
+    setPobBulkRunning(false)
+    // Refetch once at the end rather than per account: the list query is not
+    // cheap and the panel only needs to be right when the run is over.
+    fetchRows()
+  }
 
   const pageIdsAllSelected = useMemo(
     () => rows.length > 0 && rows.every(r => selected[r.companyId]),
@@ -2233,6 +2472,32 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
               </Button>
             </div>
           </Popover>
+          {/* Counts AJIO ACCOUNTS, not companies — one company can hold several
+              and each is a separate sync. A selection of 3 companies with 5
+              AJIO accounts between them reads "(5)", which is the number of
+              logins about to happen. Disabled when the selection holds none,
+              so the operator learns that before opening a dialog. */}
+          <Tooltip
+            title={
+              selectedCompanyIds.length === 0
+                ? 'Select one or more companies first'
+                : selectedAjioAccounts.length === 0
+                  ? 'No AJIO accounts in the selected companies'
+                  : `Read POB IDs for ${selectedAjioAccounts.length} AJIO account(s) across ${selectedCompanyIds.length} company(ies)`
+            }
+          >
+            <span>
+              <Button
+                variant='tonal'
+                color='primary'
+                startIcon={<i className='tabler-building-store' />}
+                disabled={selectedAjioAccounts.length === 0}
+                onClick={() => setPobBulkOpen(true)}
+              >
+                POB Sync{selectedAjioAccounts.length ? ` (${selectedAjioAccounts.length})` : ''}
+              </Button>
+            </span>
+          </Tooltip>
           <Button
             variant='contained'
             color='primary'
@@ -2439,6 +2704,91 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
           showLastButton
         />
       </div>
+
+      {/* Bulk POB sync. Progress is per account rather than a single bar: the
+          run is a sequence of independent logins and any one of them can fail
+          on its own reason ("press Renew first"), which a bar cannot say. */}
+      <Dialog
+        open={pobBulkOpen}
+        onClose={() => {
+          if (pobBulkRunning) return
+          setPobBulkOpen(false)
+          setPobBulkResults([])
+        }}
+        maxWidth='sm'
+        fullWidth
+      >
+        <DialogTitle>Sync POB IDs</DialogTitle>
+        <DialogContent>
+          <Typography variant='body2' className='mbe-4'>
+            Reads POB IDs from AJIO for {selectedAjioAccounts.length} account
+            {selectedAjioAccounts.length === 1 ? '' : 's'} across {selectedCompanyIds.length} selected company
+            {selectedCompanyIds.length === 1 ? '' : 'ies'}, and stores them on each credential.
+          </Typography>
+          <Typography variant='caption' color='text.secondary' className='mbe-4 block'>
+            One account at a time — each uses the account&apos;s cached session, so an account whose session has
+            expired is reported and skipped rather than logged in. Existing POB IDs are only replaced when AJIO
+            returns a non-empty list.
+          </Typography>
+
+          {(pobBulkRunning || pobBulkResults.length > 0) && (
+            <>
+              <div className='flex items-center gap-2 mbe-2'>
+                {pobBulkRunning && <CircularProgress size={16} />}
+                <Typography variant='body2' className='font-medium'>
+                  {pobBulkResults.length} of {selectedAjioAccounts.length} done
+                </Typography>
+              </div>
+              <div className='max-bs-[280px] overflow-y-auto'>
+                {pobBulkResults.map((r, idx) => (
+                  <div key={`${r.username}-${idx}`} className='flex items-start gap-2 plb-1'>
+                    <i
+                      className={
+                        r.ok ? 'tabler-circle-check text-success text-base' : 'tabler-alert-circle text-error text-base'
+                      }
+                    />
+                    <div>
+                      <Typography variant='body2' className='font-medium'>
+                        {r.companyName} — {r.username}
+                      </Typography>
+                      <Typography variant='caption' color='text.secondary'>
+                        {r.detail}
+                      </Typography>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            color='secondary'
+            onClick={() => {
+              // Stops after the account currently in flight. Everything already
+              // written stays written — each account was a completed save, not
+              // part of a transaction.
+              if (pobBulkRunning) {
+                pobBulkAbort.current = true
+
+                return
+              }
+
+              setPobBulkOpen(false)
+              setPobBulkResults([])
+            }}
+          >
+            {pobBulkRunning ? 'Stop' : 'Close'}
+          </Button>
+          <Button
+            variant='contained'
+            disabled={pobBulkRunning || selectedAjioAccounts.length === 0}
+            onClick={runBulkPobSync}
+          >
+            {pobBulkResults.length > 0 ? 'Run again' : 'Start'}
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <Dialog open={dialogOpen} onClose={() => (dialogSubmitting ? null : setDialogOpen(false))} maxWidth='xs' fullWidth>
         <DialogTitle>Master Sync</DialogTitle>
