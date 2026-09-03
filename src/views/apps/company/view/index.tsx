@@ -27,6 +27,7 @@ import Tooltip from '@mui/material/Tooltip'
 import Typography from '@mui/material/Typography'
 
 // Component Imports
+import AutomationRoutingCard from './AutomationRoutingCard'
 import UsageCard from './UsageCard'
 import CopyButton from '@/components/CopyButton'
 import CopyableId from '@/components/CopyableId'
@@ -801,6 +802,8 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
               )}
             </CardContent>
           </Card>
+
+          <AutomationRoutingCard companyId={row.companyId} />
 
           <Card>
             <CardHeader title='Credentials' subheader='Every marketplace login configured for this company' />
