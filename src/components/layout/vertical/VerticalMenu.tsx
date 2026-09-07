@@ -119,6 +119,9 @@ const VerticalMenu = ({ dictionary, scrollMenu }: Props) => {
           <SubMenu label='VMS' icon={<i className='tabler-video' />}>
             <MenuItem href={`/${locale}/apps/vms/pending`}>Pending VMS</MenuItem>
           </SubMenu>
+          <MenuItem href={`/${locale}/apps/bulk-management`} icon={<i className='tabler-checkbox' />}>
+            Bulk Management
+          </MenuItem>
           <MenuItem href={`/${locale}/apps/queues`} icon={<i className='tabler-stack-2' />}>
             Queues
           </MenuItem>

@@ -34,3 +34,18 @@ export const SYNCABLE_PLATFORMS = [
 ] as const
 
 export type SyncablePlatformKey = (typeof SYNCABLE_PLATFORMS)[number]['key']
+
+// Automation types, mirroring TrackVid-BE's AUTOMATION_TYPES
+// (src/constants/automationRouting.ts). Labels only — WHICH automations a
+// platform actually has comes from `platformAutomations` in the
+// automation-routing response, never from a list typed into a component.
+//
+// Shared by the per-company Automation Routing card and the Bulk Management
+// screen so the same pair is never named two different things on two screens.
+export const AUTOMATION_LABELS: Record<string, string> = {
+  claim: 'Claims',
+  masterImport: 'Master import',
+  ticketDownload: 'Tickets'
+}
+
+export const automationLabel = (automation: string) => AUTOMATION_LABELS[automation] ?? automation

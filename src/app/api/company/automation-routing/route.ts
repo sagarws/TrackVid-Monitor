@@ -1,8 +1,17 @@
-// Proxy for the company detail page's Automation Routing card.
+// Proxy for the Automation Routing card (one company) and the Bulk Management
+// screen (many companies).
 //
-// GET  ?companyId=<id>                → BE GET /system-admin/setting/companies/automation-routing
-// POST { companyIds, desktopExecution?, apiBasedAutomation?, isAutoLoginOnActiveSession? }
-//                                    → BE POST /system-admin/setting/companies/automation-routing
+// GET  ?companyId=<id>  → that company's stored maps
+// GET  (no companyId)   → the cross-company summary the bulk screen renders
+//                         from: totalCompanies, enabledCounts, platformAutomations
+//                       → BE GET /system-admin/setting/companies/automation-routing
+// POST { companyIds? | excludeCompanyIds?, desktopExecution?, apiBasedAutomation?,
+//        isAutoLoginOnActiveSession? }
+//                       → BE POST /system-admin/setting/companies/automation-routing
+//
+// `companyIds` is "for only these"; `excludeCompanyIds` is "everything but
+// these". The BE resolves the scope — an "all but these" list resolved in the
+// browser would be built from a roster that may already be stale.
 //
 // The SystemAdmin token is read from the NextAuth session so it never reaches
 // the browser. Kept in one route file (two methods) instead of two files —
@@ -40,9 +49,13 @@ export async function GET(req: Request) {
 
   if (!url) return notConfigured()
 
-  const companyId = new URL(req.url).searchParams.get('companyId') ?? ''
+  const companyId = new URL(req.url).searchParams.get('companyId')?.trim() ?? ''
 
-  const res = await fetch(`${url}?companyId=${encodeURIComponent(companyId)}`, {
+  // Omitted entirely rather than sent empty: no companyId is what asks the BE
+  // for the cross-company summary, and that should read as a deliberate call.
+  const target = companyId ? `${url}?companyId=${encodeURIComponent(companyId)}` : url
+
+  const res = await fetch(target, {
     method: 'GET',
     headers: {
       Accept: 'application/json',

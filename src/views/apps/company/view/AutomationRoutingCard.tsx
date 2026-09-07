@@ -17,6 +17,9 @@ import TableHead from '@mui/material/TableHead'
 import TableRow from '@mui/material/TableRow'
 import Typography from '@mui/material/Typography'
 
+// Config Imports
+import { automationLabel } from '@/configs/platforms'
+
 /**
  * Automation routing for one company.
  *
@@ -54,12 +57,6 @@ const FIELD_META: Record<Field, { title: string; help: string }> = {
     title: 'Use the direct-API flow',
     help: 'Talks to the platform’s APIs rather than driving its web UI.'
   }
-}
-
-const AUTOMATION_LABELS: Record<string, string> = {
-  claim: 'Claims',
-  masterImport: 'Master import',
-  ticketDownload: 'Tickets'
 }
 
 /** Every automation any platform has, in a stable column order. */
@@ -291,7 +288,7 @@ const AutomationRoutingCard = ({ companyId }: { companyId: string }) => {
                     <TableCell>Platform</TableCell>
                     {columns.map(automation => (
                       <TableCell key={automation} align='center'>
-                        {AUTOMATION_LABELS[automation] ?? automation}
+                        {automationLabel(automation)}
                       </TableCell>
                     ))}
                   </TableRow>
