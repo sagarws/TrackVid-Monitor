@@ -22,8 +22,9 @@ anyway — a missing agent only disables **Open account**, it never blocks
 front-end work. `pnpm dev:next` starts Next alone; `pnpm agent` starts the agent
 alone.
 
-The agent listens on `127.0.0.1:7788`, but the browser never talks to it
-directly: the Monitor calls `/api/agent/*` on port 4001 and the Next server
+The agent listens on `127.0.0.1:$AGENT_PORT` (7788 by default), but the browser
+never talks to it directly: the Monitor calls `/api/agent/*` on its own port
+(`$PORT` from the root `.env`, 4001 by default) and the Next server
 forwards (`src/app/api/agent/[...path]/route.ts`). One port, one origin, no CORS
 and no Private Network Access preflight. That proxy is session-gated, so an
 unauthenticated caller cannot drive the agent through it.
@@ -75,7 +76,8 @@ Adding one: drop a module in `logins/` exporting
 | Env | Default | Purpose |
 | --- | --- | --- |
 | `AGENT_PORT` | `7788` | Listen port |
-| `AGENT_ALLOWED_ORIGINS` | `http://localhost:4001,http://127.0.0.1:4001` | CORS allowlist |
+| `PORT` | `4001` | The Monitor's port; only used to build the default allowlist |
+| `AGENT_ALLOWED_ORIGINS` | `http://localhost:$PORT,http://127.0.0.1:$PORT` | CORS allowlist |
 | `AGENT_PROFILE_DIR` | OS temp dir | Where Chrome profiles live |
 | `AGENT_CHROME_CHANNEL` | `chrome` | Set empty to use bundled Chromium |
 

@@ -36,9 +36,16 @@ const { getPlatform, supportedPlatforms } = require('./logins')
 
 const PORT = Number(process.env.AGENT_PORT || 7788)
 
+// The Monitor's port, so the default allowlist below follows it instead of
+// pinning 4001. `pnpm dev` passes both through; running the agent on its own
+// falls back to whatever the root .env says.
+const MONITOR_PORT = Number(process.env.PORT) || 4001
+
 // Only the Monitor may talk to this agent. Any origin can be added for a
 // deployed Monitor, but the default keeps it to local dev.
-const ALLOWED_ORIGINS = (process.env.AGENT_ALLOWED_ORIGINS || 'http://localhost:4001,http://127.0.0.1:4001')
+const ALLOWED_ORIGINS = (
+  process.env.AGENT_ALLOWED_ORIGINS || `http://localhost:${MONITOR_PORT},http://127.0.0.1:${MONITOR_PORT}`
+)
   .split(',')
   .map(o => o.trim())
   .filter(Boolean)

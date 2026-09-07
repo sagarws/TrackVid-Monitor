@@ -1,7 +1,7 @@
 // Same-origin passthrough to the local browser agent (see agent/ in this repo),
-// so the Monitor page talks to :4001 like everything else instead of reaching
-// across to :7788. That removes the CORS allowlist and Chrome's Private Network
-// Access preflight from the picture entirely.
+// so the Monitor page talks to its own origin like everything else instead of
+// reaching across to the agent's port. That removes the CORS allowlist and
+// Chrome's Private Network Access preflight from the picture entirely.
 //
 // IMPORTANT: this forwards from the NEXT SERVER, so it only reaches the right
 // machine when the Monitor runs where the operator sits — which is the case for
@@ -15,7 +15,7 @@ import { getServerSession } from 'next-auth'
 
 import { authOptions } from '@/libs/auth'
 
-const AGENT_URL = process.env.LOCAL_AGENT_URL || 'http://127.0.0.1:7788'
+const AGENT_URL = process.env.LOCAL_AGENT_URL || `http://127.0.0.1:${process.env.AGENT_PORT || 7788}`
 
 // Login can take up to a minute on the slower portals.
 const OPEN_TIMEOUT_MS = 120_000

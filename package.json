@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node agent/dev-runner.mjs",
     "build": "next build",
-    "start": "next start -p 4001",
+    "start": "dotenv -e .env -- next start",
     "lint": "eslint . --ext .js,.jsx,.ts,.tsx",
     "lint:fix": "eslint . --ext .js,.jsx,.ts,.tsx --fix",
     "format": "prettier --write \"src/**/*.{js,jsx,ts,tsx}\"",
@@ -16,8 +16,8 @@
     "removeI18n": "tsx src/remove-translation-scripts/index.ts",
     "clean": "rm -rf .next",
     "clear": "rm -rf node_modules .next",
-    "agent": "node agent/server.js",
-    "dev:next": "next dev --turbopack -p 4001"
+    "agent": "dotenv -e .env -- node agent/server.js",
+    "dev:next": "dotenv -e .env -- next dev --turbopack"
   },
   "dependencies": {
     "@auth/prisma-adapter": "2.11.1",
