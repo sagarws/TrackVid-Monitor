@@ -28,6 +28,7 @@ import Typography from '@mui/material/Typography'
 
 // Component Imports
 import AutomationRoutingCard from './AutomationRoutingCard'
+import DesktopAppResolutionCard from './DesktopAppResolutionCard'
 import MultiStepRecordingCard from './MultiStepRecordingCard'
 import UsageCard from './UsageCard'
 import CopyButton from '@/components/CopyButton'
@@ -564,6 +565,8 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
           </Card>
 
           <MultiStepRecordingCard companyId={row.companyId} onToast={setToast} />
+
+          <DesktopAppResolutionCard companyId={row.companyId} onToast={setToast} />
 
           <Card>
             <CardHeader title='Master data sync' subheader='Oldest sync across each platform&apos;s credentials' />
