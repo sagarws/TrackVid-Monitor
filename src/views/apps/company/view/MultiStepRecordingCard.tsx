@@ -98,6 +98,66 @@ const MultiStepRecordingCard = ({ companyId, onToast }: Props) => {
   const [rows, setRows] = useState<Row[]>([])
   const [saving, setSaving] = useState(false)
 
+  // Manual step-merge trigger — separate concern from the settings above.
+  // Sends { companyId, awb } to the BE, which strips any _S{n} suffix and
+  // merges whatever steps are present. Rejects with "Step {n} incomplete"
+  // if any step is missing (backend enforces; UI just renders the message).
+  const [mergeAwb, setMergeAwb] = useState('')
+  const [merging, setMerging] = useState(false)
+  const [mergeResult, setMergeResult] = useState<{ severity: 'success' | 'error' | 'warning'; message: string } | null>(
+    null
+  )
+
+  const triggerManualMerge = useCallback(async () => {
+    const awb = mergeAwb.trim()
+
+    if (!awb) {
+      setMergeResult({ severity: 'warning', message: 'Enter an AWB (step or base) before triggering.' })
+
+      return
+    }
+
+    setMerging(true)
+    setMergeResult(null)
+
+    try {
+      const res = await fetch('/api/company/step-merge/trigger', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyId, awb })
+      })
+      const json = await res.json().catch(() => null)
+
+      if (!res.ok || !json?.isSuccess) {
+        const msg = json?.displayMessage || json?.message || `Request failed (${res.status})`
+
+        setMergeResult({ severity: 'error', message: msg })
+        onToast?.({ severity: 'error', message: msg })
+
+        return
+      }
+
+      const msg =
+        json?.displayMessage ||
+        (json?.data?.merged
+          ? `Merged into ${json?.data?.baseAwb}.`
+          : 'Merge attempted — check backend logs for the outcome.')
+
+      setMergeResult({
+        severity: json?.data?.merged ? 'success' : 'warning',
+        message: msg
+      })
+      onToast?.({ severity: 'success', message: msg })
+    } catch (err: any) {
+      const msg = err?.message || 'Network error while triggering merge'
+
+      setMergeResult({ severity: 'error', message: msg })
+      onToast?.({ severity: 'error', message: msg })
+    } finally {
+      setMerging(false)
+    }
+  }, [companyId, mergeAwb, onToast])
+
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
@@ -407,6 +467,53 @@ const MultiStepRecordingCard = ({ companyId, onToast }: Props) => {
                 Reset
               </Button>
             </div>
+
+            {/* Manual step-merge trigger. Separate section so it reads as
+                an operational tool rather than a settings field. Only shown
+                when multi-step is turned ON (a merge is meaningless
+                otherwise), matching the backend which rejects the call for
+                single-shot companies. */}
+            {mode && (
+              <>
+                <Divider className='!mt-4' />
+                <div className='flex flex-col gap-2'>
+                  <Typography variant='subtitle2'>Manual merge trigger</Typography>
+                  <Typography variant='caption' color='text.secondary'>
+                    Force-merge a base AWB now. Paste either a step AWB
+                    (<code>7698421288_S3</code>) or a base AWB
+                    (<code>7698421288</code>). If any step is missing the
+                    server responds with which step is incomplete instead
+                    of merging partial data.
+                  </Typography>
+                  <div className='flex items-center gap-2'>
+                    <CustomTextField
+                      placeholder='AWB (7698421288 or 7698421288_S3)'
+                      value={mergeAwb}
+                      onChange={e => setMergeAwb(e.target.value)}
+                      disabled={merging}
+                      fullWidth
+                      inputProps={{ 'aria-label': 'AWB to merge' }}
+                    />
+                    <Button
+                      variant='contained'
+                      color='primary'
+                      disabled={merging || !mergeAwb.trim()}
+                      onClick={triggerManualMerge}
+                      startIcon={
+                        merging ? (
+                          <CircularProgress size={14} color='inherit' />
+                        ) : (
+                          <i className='tabler-git-merge' />
+                        )
+                      }
+                    >
+                      {merging ? 'Merging…' : 'Trigger Merge'}
+                    </Button>
+                  </div>
+                  {mergeResult && <Alert severity={mergeResult.severity}>{mergeResult.message}</Alert>}
+                </div>
+              </>
+            )}
           </div>
         )}
       </CardContent>
