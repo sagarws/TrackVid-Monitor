@@ -96,13 +96,24 @@ export type CredentialSync = {
   // Empty on every other platform, and on an AJIO account that has never been
   // synced. Rows synced before 2026-08-26 hold a single parent id instead; a
   // re-sync replaces them. See TrackVid-BE company.model.ts.
-  pobIds: string[]
+  pobIds: PobEntry[]
   pobSyncedAt: string // ISO string, '' when never synced
   // AJIO only: whether this seller account is an enterprise-level login, which
   // changes which AJIO portal APIs the runner is allowed to call. Stored on the
   // credential as `IsEnterPriceLevel` (BE's spelling — kept verbatim on the
   // wire, normalised to this camelCase field here). Absent = false.
   isEnterpriseLevel: boolean
+}
+
+// One stored AJIO POB, as the BE projects it: an object rather than a bare id,
+// so per-POB facts have somewhere to live. `addedAt` is FIRST-SEEN — the sync
+// carries it forward for every id that survives a re-read — which is what makes
+// "this POB is new on the account" answerable. '' when unknown: credentials
+// migrated from the old `string[]` shape have no date to recover, and neither
+// does one whose list predates `pobSyncedAt`.
+type PobEntry = {
+  id: string
+  addedAt: string // ISO string, '' when unknown
 }
 
 // Metadata for a cached marketplace cookie jar, as the BE projects it onto the
@@ -296,10 +307,39 @@ const describeSession = (session: CredentialSession) => {
   return parts.join(' · ') || 'Session stored, but with no expiry recorded'
 }
 
+// Normalise one credential's stored POB list. The BE projects objects, but this
+// accepts a bare string too: an unmigrated row reaching a client that has been
+// deployed ahead of the BE should show its ids without a date, not an empty
+// list and a red button claiming the account was never synced.
+const toPobEntries = (raw: unknown): PobEntry[] => {
+  if (!Array.isArray(raw)) return []
+
+  return raw
+    .map((entry: any): PobEntry => {
+      if (entry && typeof entry === 'object') {
+        return { id: String(entry.id ?? ''), addedAt: toIsoDate(entry.addedAt) }
+      }
+
+      return { id: String(entry ?? ''), addedAt: '' }
+    })
+    .filter(entry => entry.id)
+}
+
+// How many POB ids the tooltip names before it starts counting instead. Twelve
+// fits a tooltip without scrolling on a laptop; the accounts that overflow it
+// are the ones where reading every id was never the point.
+const POB_TOOLTIP_LIMIT = 12
+
 // Tooltip for the AJIO POBs button. Absolute timestamp first — that is what an
 // operator compares against a claim or an import run — then relative, which is
 // what tells them whether the list is stale enough to re-read.
-const describePobSync = (pobIds: string[], pobSyncedAt: string) => {
+//
+// Newest POBs lead the list. With 61 ids on one account the ones worth reading
+// are the ones that appeared recently — an id added last week is the reason
+// someone opens this tooltip, and it would otherwise sit in the middle of a
+// wall of text. Undated ids (pre-migration rows) sort last for the same reason:
+// nothing about them is news.
+const describePobSync = (pobIds: PobEntry[], pobSyncedAt: string) => {
   if (pobIds.length === 0) {
     return 'No POB IDs stored for this account yet — click to read them from AJIO'
   }
@@ -308,7 +348,21 @@ const describePobSync = (pobIds: string[], pobSyncedAt: string) => {
     ? `Synced ${formatSyncDate(pobSyncedAt)} (${relativeToNow(pobSyncedAt)})`
     : 'Sync time not recorded'
 
-  return `${pobIds.length} POB ID${pobIds.length === 1 ? '' : 's'}: ${pobIds.join(', ')} · ${when} · Click to re-read from AJIO`
+  const ordered = [...pobIds].sort((a, b) => (b.addedAt || '').localeCompare(a.addedAt || ''))
+
+  // Dated ids run ~40 characters each. Spelling out all 61 of a large seller's
+  // POBs makes a 2,400-character tooltip nobody reads, so only the newest are
+  // named and the rest are counted. Nothing is lost: the ids are sorted newest
+  // first, so what the cap hides is the oldest — the part that was already
+  // there last time anyone looked.
+  const shown = ordered.slice(0, POB_TOOLTIP_LIMIT)
+
+  const listed =
+    shown
+      .map(entry => (entry.addedAt ? `${entry.id} (added ${formatSyncDate(entry.addedAt)})` : entry.id))
+      .join(', ') + (ordered.length > shown.length ? `, +${ordered.length - shown.length} older` : '')
+
+  return `${pobIds.length} POB ID${pobIds.length === 1 ? '' : 's'}, newest first: ${listed} · ${when} · Click to re-read from AJIO`
 }
 
 // "in 42m" / "2h ago" — the number ops actually reads off an expiry.
@@ -374,7 +428,7 @@ const pickCredentials = (loginInfo: any): PlatformCredentials[] => {
         isVerified: acc?.is_verified !== false, // undefined = legacy cred, treat as verified
         lastSync: toIsoDate(acc?.masterDataSync),
         session: pickSession(acc, key),
-        pobIds: Array.isArray(acc?.pobIds) ? acc.pobIds.map((p: unknown) => String(p ?? '')).filter(Boolean) : [],
+        pobIds: toPobEntries(acc?.pobIds),
         pobSyncedAt: toIsoDate(acc?.pobSyncedAt),
         // Strict true: the field is absent on every credential written before
         // it existed, and "not set" means the standard (non-enterprise) login.
