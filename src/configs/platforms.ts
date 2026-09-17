@@ -16,6 +16,7 @@ export const PLATFORMS = [
   { key: 'nykaa', label: 'Nykaa' },
   { key: 'delhivery', label: 'Delhivery' },
   { key: 'xbees', label: 'Xbees' },
+  { key: 'tatacliq', label: 'Tata CliQ' },
   { key: 'd2c', label: 'D2C' },
   { key: 'other', label: 'Other' }
 ] as const

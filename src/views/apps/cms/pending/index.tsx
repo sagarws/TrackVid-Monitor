@@ -88,12 +88,16 @@ export type MyntraSession = {
   // (already visible in the UI) so exposing them helps ops read the record.
   userId?: string | null
   pobCount?: number
+  // Tata CliQ: how many warehouses this session can search. A session listing
+  // none searches nothing, so zero is the difference between a live session
+  // and a useless one — worth showing next to the expiry.
+  slaveCount?: number
   cookieNames: string[]
 }
 
-// AJIO reuses the same summary shape via optional fields on MyntraSession
-// (userId + pobCount above). One export keeps the render code polymorphic
-// across the three platforms.
+// Every platform reuses the same summary shape via optional fields on
+// MyntraSession (userId + pobCount above, slaveCount below). One export keeps
+// the render code polymorphic across all of them.
 export type AjioSession = MyntraSession
 
 // One configured login on the platform being reported on.
@@ -104,9 +108,12 @@ export type PlatformCredential = {
   vendorCode: string
   isVerified: boolean
   visible: boolean
-  myntraSession: MyntraSession | null
-  flipkartSession: MyntraSession | null
-  ajioSession: AjioSession | null
+  // Keyed by platform, not one named field per platform. Only the selected
+  // platform's entry is ever read, and a fourth named field was the point at
+  // which the three-way `isMyntra ? … : isAjio ? …` chains in this file
+  // started dropping platforms — the Renew tooltip already told AJIO users
+  // they were logging in to Myntra. See SESSION_VIEWS.
+  sessions: Partial<Record<string, MyntraSession | null>>
 }
 
 export type PendingCompanyRow = {
@@ -324,6 +331,100 @@ const claimStatusColor = (status: string | null): 'default' | 'success' | 'error
   return 'default'
 }
 
+/**
+ * Which platforms cache a session per credential, and everything this screen
+ * needs to say about one.
+ *
+ * THE ONLY PLACE A PLATFORM IS NAMED on this screen. It replaced four separate
+ * `platform === 'flipkart' ? … : platform === 'ajio' ? … : …` chains — the
+ * table header, the Renew tooltip, the renew endpoint and the dialog title —
+ * which had already come apart: the tooltip offered "Run a fresh Myntra login"
+ * to an AJIO credential, because AJIO was added to three of the four.
+ *
+ * A platform absent here has no session to show: it logs in fresh each run,
+ * and the Session / View columns are hidden for it rather than rendered empty.
+ */
+type SessionView = {
+  /** The field the API returns this platform's summary under. */
+  field: string
+  /** Column header. */
+  label: string
+  /** The platform's name in a sentence. */
+  name: string
+  /** Monitor's own proxy for the renewal. */
+  renewPath: string
+  /** What the Renew button is waiting for, while it waits. */
+  waiting: string
+  /** What the dialog says about the secrets it is not showing. */
+  secrets: string
+  /** The non-cookie fields this platform's summary carries. */
+  extra?: (raw: any) => Partial<MyntraSession>
+}
+
+const SESSION_VIEWS: Record<string, SessionView> = {
+  myntra: {
+    field: 'myntraSession',
+    label: 'Myntra session',
+    name: 'Myntra',
+    renewPath: '/api/cms/renew-myntra-session',
+    waiting: 'this takes up to a minute',
+    secrets:
+      'Cookie values are never sent to this dashboard — `jar` is reported as `cookieNames`. ' +
+      '`erp.at` and `session` are the two the automation requires.',
+    extra: raw => ({ hasProxySession: Boolean(raw.hasProxySession) })
+  },
+  flipkart: {
+    field: 'flipkartSession',
+    label: 'Flipkart session',
+    name: 'Flipkart',
+    renewPath: '/api/cms/renew-flipkart-session',
+    waiting: 'the OTP mail can take a couple of minutes',
+    secrets:
+      'Cookie values never reach this dashboard — `jar` is reported as `cookieNames`, and the ' +
+      'fk-csrf-token only as `hasCsrfToken`.',
+    extra: raw => ({ hasCsrfToken: Boolean(raw.hasCsrfToken) })
+  },
+  ajio: {
+    field: 'ajioSession',
+    label: 'AJIO session',
+    name: 'AJIO',
+    renewPath: '/api/cms/renew-ajio-session',
+    waiting: 'the Reliance SSO login takes a minute or two',
+    secrets:
+      'Cookie values never reach this dashboard — `jar` is reported as `cookieNames`. ' +
+      '`userId` and `pobCount` carry no secret and are shown as stored.',
+    extra: raw => ({ userId: raw.userId ?? null, pobCount: Number(raw.pobCount ?? 0) })
+  },
+  tatacliq: {
+    field: 'tatacliqSession',
+    label: 'Tata CliQ session',
+    name: 'Tata CliQ',
+    renewPath: '/api/cms/renew-tatacliq-session',
+    waiting: 'the code mail can take a couple of minutes',
+    secrets:
+      'Cookie values never reach this dashboard — `jar` is reported as `cookieNames`. ' +
+      '`slaveCount` is how many warehouses this session can search; a session with none ' +
+      'searches nothing.',
+    extra: raw => ({ slaveCount: Number(raw.slaveCount ?? 0) })
+  }
+}
+
+/** One platform's stored session, as the API reports it. */
+const readSession = (cred: any, view: SessionView): MyntraSession | null => {
+  const raw = cred?.[view.field]
+
+  if (!raw || typeof raw !== 'object') return null
+
+  return {
+    savedAt: raw.savedAt ?? null,
+    expiresAt: raw.expiresAt ?? null,
+    ip: raw.ip ?? null,
+    source: raw.source ?? null,
+    cookieNames: Array.isArray(raw.cookieNames) ? raw.cookieNames : [],
+    ...(view.extra?.(raw) ?? {})
+  }
+}
+
 const mapCompanyToRow = (c: any): PendingCompanyRow => ({
   companyId: String(c?.companyId ?? ''),
   companyName: String(c?.companyName ?? '—'),
@@ -340,37 +441,9 @@ const mapCompanyToRow = (c: any): PendingCompanyRow => ({
       // count as verified, matching the automation's own rule.
       isVerified: cred?.is_verified !== false,
       visible: cred?.visible !== false,
-      myntraSession: cred?.myntraSession
-        ? {
-            savedAt: cred.myntraSession.savedAt ?? null,
-            expiresAt: cred.myntraSession.expiresAt ?? null,
-            ip: cred.myntraSession.ip ?? null,
-            source: cred.myntraSession.source ?? null,
-            hasProxySession: Boolean(cred.myntraSession.hasProxySession),
-            cookieNames: Array.isArray(cred.myntraSession.cookieNames) ? cred.myntraSession.cookieNames : []
-          }
-        : null,
-      flipkartSession: cred?.flipkartSession
-        ? {
-            savedAt: cred.flipkartSession.savedAt ?? null,
-            expiresAt: cred.flipkartSession.expiresAt ?? null,
-            ip: cred.flipkartSession.ip ?? null,
-            source: cred.flipkartSession.source ?? null,
-            hasCsrfToken: Boolean(cred.flipkartSession.hasCsrfToken),
-            cookieNames: Array.isArray(cred.flipkartSession.cookieNames) ? cred.flipkartSession.cookieNames : []
-          }
-        : null,
-      ajioSession: cred?.ajioSession
-        ? {
-            savedAt: cred.ajioSession.savedAt ?? null,
-            expiresAt: cred.ajioSession.expiresAt ?? null,
-            ip: cred.ajioSession.ip ?? null,
-            source: cred.ajioSession.source ?? null,
-            userId: cred.ajioSession.userId ?? null,
-            pobCount: Number(cred.ajioSession.pobCount ?? 0),
-            cookieNames: Array.isArray(cred.ajioSession.cookieNames) ? cred.ajioSession.cookieNames : []
-          }
-        : null
+      sessions: Object.fromEntries(
+        Object.entries(SESSION_VIEWS).map(([key, view]) => [key, readSession(cred, view)])
+      )
     })
   ),
   claims: (Array.isArray(c?.pendingClaims) ? c.pendingClaims : []).map((claim: any): PendingClaim => ({
@@ -457,17 +530,12 @@ const CredentialsPanel = ({
   onViewSession: (credential: PlatformCredential) => void
   onRenewSession: (credential: PlatformCredential) => void
 }) => {
-  const isMyntra = platform === 'myntra'
-  const isFlipkart = platform === 'flipkart'
-  const isAjio = platform === 'ajio'
-
-  // These three platforms cache a session per credential and can renew it on
-  // demand; every other platform logs in fresh each run and has nothing to
-  // show here.
-  const supportsSession = isMyntra || isFlipkart || isAjio
-  const sessionLabel = isFlipkart ? 'Flipkart session' : isAjio ? 'AJIO session' : 'Myntra session'
-  const sessionFor = (cred: PlatformCredential) =>
-    isFlipkart ? cred.flipkartSession : isAjio ? cred.ajioSession : cred.myntraSession
+  // A platform in SESSION_VIEWS caches a session per credential and can renew
+  // it on demand; every other platform logs in fresh each run and has nothing
+  // to show here, so the two session columns are hidden rather than empty.
+  const view = SESSION_VIEWS[platform]
+  const supportsSession = Boolean(view)
+  const sessionFor = (cred: PlatformCredential) => cred.sessions[platform] ?? null
 
   return (
     <div className='overflow-auto rounded border mbe-4'>
@@ -478,7 +546,7 @@ const CredentialsPanel = ({
             <th className='is-[140px]'>Type</th>
             <th className='is-[160px]'>Vendor code</th>
             <th className='is-[140px]'>Verified</th>
-            {supportsSession && <th className='is-[280px]'>{sessionLabel}</th>}
+            {supportsSession && <th className='is-[280px]'>{view?.label}</th>}
             {supportsSession && <th className='is-[90px] text-center'>View</th>}
           </tr>
         </thead>
@@ -541,10 +609,8 @@ const CredentialsPanel = ({
                         <Tooltip
                           title={
                             busy
-                              ? isFlipkart
-                                ? 'Logging in to Flipkart — the OTP mail can take a couple of minutes'
-                                : 'Logging in to Myntra — this takes up to a minute'
-                              : `Run a fresh ${isFlipkart ? 'Flipkart' : 'Myntra'} login and store the new session`
+                              ? `Logging in to ${view?.name} — ${view?.waiting}`
+                              : `Run a fresh ${view?.name} login and store the new session`
                           }
                         >
                           <span>
@@ -807,13 +873,9 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
   const [sessionCredential, setSessionCredential] = useState<PlatformCredential | null>(null)
 
   // Which stored session the eye-icon dialog is showing. Derived from the
-  // selected platform so one dialog serves Myntra, Flipkart, and AJIO.
-  const viewedSession =
-    (platform === 'flipkart'
-      ? sessionCredential?.flipkartSession
-      : platform === 'ajio'
-        ? sessionCredential?.ajioSession
-        : sessionCredential?.myntraSession) ?? null
+  // selected platform, so one dialog serves every platform in SESSION_VIEWS.
+  const viewedSession = sessionCredential?.sessions[platform] ?? null
+  const sessionView = SESSION_VIEWS[platform]
   // credentialIds with a renewal in flight.
   const [renewing, setRenewing] = useState<Set<string>>(new Set())
 
@@ -1065,14 +1127,20 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
       }
 
       // The renew endpoint is per-platform: each one drives a different login
-      // flow on the automation box, and only these three cache a session at all.
-      const renewEndpoint =
-        platform === 'flipkart'
-          ? '/api/cms/renew-flipkart-session'
-          : platform === 'ajio'
-            ? '/api/cms/renew-ajio-session'
-            : '/api/cms/renew-myntra-session'
-      const platformName = platform === 'flipkart' ? 'Flipkart' : platform === 'ajio' ? 'AJIO' : 'Myntra'
+      // flow on the automation box, and only a platform in SESSION_VIEWS caches
+      // a session at all. The button is not rendered for the others, so a
+      // missing entry here means a caller got past that — reported rather than
+      // posted to whichever endpoint happened to be the fallback.
+      const renewView = SESSION_VIEWS[platform]
+
+      if (!renewView) {
+        setToast({ severity: 'error', message: `${platform} does not cache a session to renew` })
+
+        return
+      }
+
+      const renewEndpoint = renewView.renewPath
+      const platformName = renewView.name
 
       setRenewing(prev => new Set(prev).add(credential.credentialId))
       setToast({ severity: 'info', message: `Logging in to ${platformName} as ${credential.username}…` })
@@ -2230,7 +2298,7 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
       </Dialog>
 
       <Dialog open={Boolean(sessionCredential)} onClose={() => setSessionCredential(null)} maxWidth='sm' fullWidth>
-        <DialogTitle>{platform === 'flipkart' ? 'Flipkart' : 'Myntra'} session</DialogTitle>
+        <DialogTitle>{sessionView?.label ?? 'Session'}</DialogTitle>
         <DialogContent>
           {viewedSession ? (
             <div className='flex flex-col gap-3'>
@@ -2253,14 +2321,13 @@ const PendingCmsList = ({ impersonateBaseUrl }: Props) => {
               {/* The record as stored, minus the secrets: `jar` holds live auth
                   cookies (and, on Flipkart, an fk-csrf-token that signs every
                   API call), so the API sends names only — `jar` is rendered as
-                  `cookieNames` and the csrf token as a boolean. */}
+                  `cookieNames` and the csrf token as a boolean. What each
+                  platform withholds is its SESSION_VIEWS `secrets` line. */}
               <pre className='bg-actionHover rounded border plb-3 pli-4 overflow-auto max-bs-[420px] text-xs font-mono whitespace-pre'>
                 {JSON.stringify(viewedSession, null, 2)}
               </pre>
               <Typography variant='caption' color='text.secondary'>
-                {platform === 'flipkart'
-                  ? 'Cookie values never reach this dashboard — `jar` is reported as `cookieNames`, and the fk-csrf-token only as `hasCsrfToken`.'
-                  : 'Cookie values are never sent to this dashboard — `jar` is reported as `cookieNames`. `erp.at` and `session` are the two the automation requires.'}
+                {sessionView?.secrets}
               </Typography>
             </div>
           ) : null}

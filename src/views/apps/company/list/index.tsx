@@ -263,7 +263,8 @@ const SESSION_FIELDS: Partial<Record<FilterPlatformKey, string>> = {
   delhivery: 'delhiverySession',
   xbees: 'xbeesSession',
   meesho: 'meeshoSession',
-  nykaa: 'nykaaSession'
+  nykaa: 'nykaaSession',
+  tatacliq: 'tatacliqSession'
 }
 
 const pickSession = (acc: any, key: FilterPlatformKey): CredentialSession | null => {
