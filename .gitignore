@@ -133,3 +133,6 @@ package-lock.json
 .env.*
 graphify-out/
 FRONTEND_RULE.md
+# Claude Code — local session state, never shared
+.claude/projects/
+.claude/settings.local.json

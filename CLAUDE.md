@@ -1,5 +1,46 @@
 # TrackVid-Monitor — Claude Instructions
 
+> **Orientation.** Read this header, then the rules below. Both are binding.
+
+|  |  |
+|---|---|
+| **Tier** | **1 — control plane.** Writes the settings two runners obey at runtime. |
+| **Stack** | Next.js App Router + MUI 7 + Prisma + next-auth v4 + Redux Toolkit + react-hook-form/valibot + Tiptap + Iconify |
+| **Package manager** | **`pnpm`** — not npm, not yarn |
+| **Dev** | `pnpm dev` → http://localhost:4001 |
+| **Verify** | `pnpm lint` · verify UI changes in the browser before declaring done |
+
+## Layout
+
+```
+src/app/[lang]/…     App Router pages — thin, delegate to views/
+src/app/api/*        proxy routes to TrackVid-BE, attach SystemAdmin token server-side
+src/views/<feature>/ the real page implementations
+src/components/      your components
+src/@core/ @layouts/ @menu/     READ-ONLY template code — never edit
+src/libs/ src/hooks/ src/utils/
+```
+
+## Cross-repo
+
+| | |
+|---|---|
+| **Calls** | TrackVid-BE only — Monitor holds no DB credentials and calls no runner directly |
+| **Affects** | Automated-Scripts and Trackvid-CMS, at runtime, with no code change — via the settings it writes |
+
+
+## Do not
+
+- **Do not edit `src/@core/`, `src/@layouts/` or `src/@menu/`.** They are read-only template code. Wrap them in `src/components/` or `src/libs/` instead.
+- **Do not use npm or yarn.** `pnpm` only.
+- **Do not invent a new top-level folder under `src/`.**
+- **Do not hard-code a platform list or `switch` on a platform name.** Render what `GET /system-admin/setting/companies/automation-routing` returns — a list typed into a `.tsx` silently omits every platform added later.
+- **Do not invent a platform key.** Match `PLATFORM_AUTOMATIONS` exactly, casing included, or you write a setting nothing reads.
+- **Do not send a whole settings map.** The endpoints take partial maps and write dotted paths; sending everything overwrites what another operator just changed.
+- **Do not call a runner or the database directly.** Everything goes through TrackVid-BE, with the SystemAdmin token attached server-side so it never reaches the browser.
+- **Do not add a parallel library** to the fixed stack (MUI 7, react-hook-form + valibot, RTK, Prisma, Tiptap, Iconify, date-fns, @tanstack/react-table, apexcharts/recharts, react-toastify, next-auth v4).
+- **Do not maintain locale files.** English-only; do not import from `src/data/dictionaries/*`.
+
 ## You are the control plane
 
 This app writes the settings that decide how automations behave in two other
