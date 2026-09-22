@@ -113,6 +113,7 @@ const HorizontalMenu = ({ dictionary }: { dictionary: Awaited<ReturnType<typeof 
           </SubMenu>
           <SubMenu label='CMS' icon={<i className='tabler-file-description' />}>
             <MenuItem href={`/${locale}/apps/cms/pending`}>Pending CMS</MenuItem>
+            <MenuItem href={`/${locale}/apps/cms/app-release`}>Desktop App Version</MenuItem>
           </SubMenu>
           <SubMenu label='VMS' icon={<i className='tabler-video' />}>
             <MenuItem href={`/${locale}/apps/vms/pending`}>Pending VMS</MenuItem>
