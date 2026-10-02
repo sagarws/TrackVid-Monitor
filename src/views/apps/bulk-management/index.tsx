@@ -14,15 +14,19 @@ import Typography from '@mui/material/Typography'
 // Component Imports
 import CustomTabList from '@core/components/mui/TabList'
 import AutomationTab from './AutomationTab'
+import DesktopAppTab from './DesktopAppTab'
 
 // Bulk Management — "apply this setting to a lot of companies at once".
 //
-// A tab shell from the start even though Automation is the only tab today: the
-// per-company settings this control plane owns already come in several
-// families, and each will want the same scope-then-apply shape. Adding the
-// second tab should be one entry here, not a re-layout of the page.
+// A tab per family of settings: they all want the same scope-then-apply shape,
+// but "where does this automation run" and "has this company accepted the
+// desktop app's notice" are different questions and reading them in one list
+// would flatten that. Adding the next family is one entry here.
 
-const TABS = [{ value: 'automation', label: 'Automation', icon: 'tabler-robot' }] as const
+const TABS = [
+  { value: 'automation', label: 'Automation', icon: 'tabler-robot' },
+  { value: 'desktop-app', label: 'Desktop App', icon: 'tabler-device-desktop' }
+] as const
 
 const BulkManagement = () => {
   const [activeTab, setActiveTab] = useState<string>(TABS[0].value)
@@ -52,6 +56,9 @@ const BulkManagement = () => {
         <Grid size={{ xs: 12 }}>
           <TabPanel value='automation' className='p-0'>
             <AutomationTab />
+          </TabPanel>
+          <TabPanel value='desktop-app' className='p-0'>
+            <DesktopAppTab />
           </TabPanel>
         </Grid>
       </Grid>

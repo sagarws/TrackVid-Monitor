@@ -43,6 +43,9 @@ import CustomTextField from '@core/components/mui/TextField'
  *                        way past it — the app cannot be used until it updates.
  *   link                 a manual download URL, stored and served for an
  *                        operator whose automatic update failed.
+ *   ymlLinkForBackend /  where the BACKEND proxies `latest.yml` / the installer
+ *   cmsLinkForBackend    from (a Drive share or direct https URL). Never sent to
+ *                        the app; empty serves the files from BE's `cmsapp/`.
  *
  * THREE THINGS ARE EASY TO GET WRONG HERE, so the form guards each:
  *
@@ -70,9 +73,22 @@ type Policy = {
   versionName: string
   isForceFullyUpdate: boolean
   link: string
+  /** Absolute URL of the release manifest — the latest.yml beside the installer. */
+  ymlLink: string
+  /** Where BE proxies latest.yml from — a Drive share or a direct https URL. */
+  ymlLinkForBackend: string
+  /** Where BE proxies the installer from. Its bytes must match the yml's sha512/size. */
+  cmsLinkForBackend: string
 }
 
-const emptyPolicy = (): Policy => ({ versionName: '', isForceFullyUpdate: false, link: '' })
+const emptyPolicy = (): Policy => ({
+  versionName: '',
+  isForceFullyUpdate: false,
+  link: '',
+  ymlLink: '',
+  ymlLinkForBackend: '',
+  cmsLinkForBackend: ''
+})
 
 /**
  * Exactly what the desktop app's own parser accepts: three numeric parts, with
@@ -87,6 +103,9 @@ const CmsAppRelease = () => {
   const [versionName, setVersionName] = useState('')
   const [isForceFullyUpdate, setIsForceFullyUpdate] = useState(false)
   const [link, setLink] = useState('')
+  const [ymlLink, setYmlLink] = useState('')
+  const [ymlLinkForBackend, setYmlLinkForBackend] = useState('')
+  const [cmsLinkForBackend, setCmsLinkForBackend] = useState('')
   const [saving, setSaving] = useState(false)
   const [confirming, setConfirming] = useState(false)
   const [toast, setToast] = useState<Toast | null>(null)
@@ -96,6 +115,9 @@ const CmsAppRelease = () => {
     setVersionName(policy.versionName ?? '')
     setIsForceFullyUpdate(policy.isForceFullyUpdate === true)
     setLink(policy.link ?? '')
+    setYmlLink(policy.ymlLink ?? '')
+    setYmlLinkForBackend(policy.ymlLinkForBackend ?? '')
+    setCmsLinkForBackend(policy.cmsLinkForBackend ?? '')
   }, [])
 
   const load = useCallback(async () => {
@@ -130,6 +152,9 @@ const CmsAppRelease = () => {
 
   const trimmedVersion = versionName.trim()
   const trimmedLink = link.trim()
+  const trimmedYml = ymlLink.trim()
+  const trimmedYmlForBackend = ymlLinkForBackend.trim()
+  const trimmedCmsForBackend = cmsLinkForBackend.trim()
 
   const versionError = useMemo(() => {
     if (trimmedVersion === '') return null
@@ -145,6 +170,24 @@ const CmsAppRelease = () => {
     return 'Must start with http:// or https://'
   }, [trimmedLink])
 
+  const ymlError = useMemo(() => {
+    if (trimmedYml === '') return null
+    if (/^https?:\/\/\S+\.ya?ml$/i.test(trimmedYml)) return null
+
+    // electron-updater asks the DIRECTORY this sits in for `<channel>.yml`, so a
+    // share page or a folder cannot work however valid the URL looks — and the
+    // failure lands on machines nobody can reach to correct.
+    return 'Must point straight at latest.yml — not a folder or a share page'
+  }, [trimmedYml])
+
+  // A Drive share page is fine for these two — the backend resolves it to a
+  // direct download — so only the scheme is checked, matching BE.
+  const backendSourceError = (value: string) =>
+    value === '' || /^https?:\/\/\S+$/i.test(value) ? null : 'Must start with http:// or https://'
+
+  const ymlForBackendError = backendSourceError(trimmedYmlForBackend)
+  const cmsForBackendError = backendSourceError(trimmedCmsForBackend)
+
   // The backend refuses this too; catching it here explains it in place rather
   // than as a failed save.
   const forceWithoutVersion = isForceFullyUpdate && trimmedVersion === ''
@@ -153,11 +196,22 @@ const CmsAppRelease = () => {
     () =>
       trimmedVersion !== saved.versionName ||
       isForceFullyUpdate !== saved.isForceFullyUpdate ||
-      trimmedLink !== saved.link,
-    [trimmedVersion, trimmedLink, isForceFullyUpdate, saved]
+      trimmedLink !== saved.link ||
+      trimmedYml !== saved.ymlLink ||
+      trimmedYmlForBackend !== (saved.ymlLinkForBackend ?? '') ||
+      trimmedCmsForBackend !== (saved.cmsLinkForBackend ?? ''),
+    [trimmedVersion, trimmedLink, trimmedYml, trimmedYmlForBackend, trimmedCmsForBackend, isForceFullyUpdate, saved]
   )
 
-  const canSave = dirty && !saving && !versionError && !linkError && !forceWithoutVersion
+  const canSave =
+    dirty &&
+    !saving &&
+    !versionError &&
+    !linkError &&
+    !ymlError &&
+    !ymlForBackendError &&
+    !cmsForBackendError &&
+    !forceWithoutVersion
 
   const submit = useCallback(async () => {
     setSaving(true)
@@ -169,7 +223,10 @@ const CmsAppRelease = () => {
         body: JSON.stringify({
           versionName: trimmedVersion,
           isForceFullyUpdate,
-          link: trimmedLink
+          link: trimmedLink,
+          ymlLink: trimmedYml,
+          ymlLinkForBackend: trimmedYmlForBackend,
+          cmsLinkForBackend: trimmedCmsForBackend
         })
       })
       const json = await res.json().catch(() => null)
@@ -200,7 +257,7 @@ const CmsAppRelease = () => {
       setSaving(false)
       setConfirming(false)
     }
-  }, [trimmedVersion, trimmedLink, isForceFullyUpdate, apply])
+  }, [trimmedVersion, trimmedLink, trimmedYml, trimmedYmlForBackend, trimmedCmsForBackend, isForceFullyUpdate, apply])
 
   // Every save that leaves the block ON is confirmed, not only the one that
   // turns it on: changing the version under a live force is the same act with
@@ -302,6 +359,22 @@ const CmsAppRelease = () => {
               <div className='max-is-[520px]'>
                 <CustomTextField
                   fullWidth
+                  label='Manifest (latest.yml) link'
+                  placeholder='https://…/latest.yml'
+                  value={ymlLink}
+                  disabled={saving}
+                  error={Boolean(ymlError)}
+                  onChange={e => setYmlLink(e.target.value)}
+                  helperText={
+                    ymlError ??
+                    'Where the app reads the release from. Its FOLDER must also hold the installer named inside it. Leave empty and each machine uses the feed baked in when it was built.'
+                  }
+                />
+              </div>
+
+              <div className='max-is-[520px]'>
+                <CustomTextField
+                  fullWidth
                   label='Download link'
                   placeholder='https://…'
                   value={link}
@@ -311,6 +384,45 @@ const CmsAppRelease = () => {
                   helperText={
                     linkError ??
                     'Optional fallback for a machine whose automatic update failed. Stored and served; the app updates itself from its own feed.'
+                  }
+                />
+              </div>
+
+              <Divider />
+
+              <div className='flex flex-col gap-0.5'>
+                <Typography color='text.primary'>Backend file source</Typography>
+                <Typography variant='caption' color='text.secondary'>
+                  Where the backend fetches the files it serves at /latest.yml and /&lt;installer&gt;.exe. A Google Drive
+                  share link works here. Leave empty to serve them from the backend&apos;s own cmsapp folder.
+                </Typography>
+              </div>
+
+              <div className='max-is-[520px]'>
+                <CustomTextField
+                  fullWidth
+                  label='Manifest (latest.yml) source for backend'
+                  placeholder='https://drive.google.com/file/d/…/view'
+                  value={ymlLinkForBackend}
+                  disabled={saving}
+                  error={Boolean(ymlForBackendError)}
+                  onChange={e => setYmlLinkForBackend(e.target.value)}
+                  helperText={ymlForBackendError ?? 'Never sent to the app — only the backend reads it.'}
+                />
+              </div>
+
+              <div className='max-is-[520px]'>
+                <CustomTextField
+                  fullWidth
+                  label='Installer (.exe) source for backend'
+                  placeholder='https://drive.google.com/file/d/…/view'
+                  value={cmsLinkForBackend}
+                  disabled={saving}
+                  error={Boolean(cmsForBackendError)}
+                  onChange={e => setCmsLinkForBackend(e.target.value)}
+                  helperText={
+                    cmsForBackendError ??
+                    'Must be the exact build the manifest describes — its sha512 and size are checked on install.'
                   }
                 />
               </div>
