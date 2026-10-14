@@ -129,6 +129,7 @@
     "typescript": "5.9.3"
   },
   "resolutions": {
+    "@tiptap/extensions": "3.14.0",
     "rimraf": "5.0.7",
     "unicorn-magic": "0.1.0",
     "react": "19.2.3",
@@ -137,6 +138,7 @@
     "eslint-config-next": "15.1.2"
   },
   "overrides": {
+    "@tiptap/extensions": "3.14.0",
     "rimraf": "5.0.7",
     "unicorn-magic": "0.1.0",
     "react": "19.2.3",

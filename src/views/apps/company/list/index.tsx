@@ -140,6 +140,10 @@ export type CompanyRow = {
   adminName: string
   adminEmail: string
   adminPhone: string
+  // Desktop app (CMS): the version it last reported ('' = never installed) and
+  // whether the responsible-use notice was accepted.
+  cmsAppVersion: string
+  cmsTermsAgreed: boolean
   // Per-platform rollup shown in the collapsed row: the OLDEST date across that
   // platform's credentials, so a single stale account stays visible instead of
   // being masked by a freshly-synced sibling.
@@ -470,6 +474,8 @@ export const mapUserToRow = (u: any): CompanyRow => {
     adminName: String(u?.name?.fullName || `${u?.name?.firstName ?? ''} ${u?.name?.lastName ?? ''}`.trim() || '—'),
     adminEmail: String(u?.email ?? ''),
     adminPhone: formatPhone(u?.phone),
+    cmsAppVersion: typeof u?.company?.settings?.cmsAppVersion === 'string' ? u.company.settings.cmsAppVersion : '',
+    cmsTermsAgreed: u?.company?.settings?.cmsTermsAgreed === true,
     lastSync: rollUpLastSync(credentials),
     credentials
   }
@@ -514,6 +520,28 @@ type SyncResponse = {
 // column, which is what the header's arrow refers to. Mirrors the BE's own
 // whitelist in companyList.
 type UsageSortField = 'cms_orders' | 'forward_orders' | 'return_orders' | 'total_orders' | 'total_effective_amount'
+
+// Is the company's desktop app connected right now — from the backend's live
+// socket connections, see POST /system-admin/company/cms-presence.
+type CmsPresence = {
+  companyId: string
+  online: boolean
+  clients: number
+  since: string | null
+  appVersions: string[]
+}
+
+type CmsPresenceResponse = {
+  isSuccess?: boolean
+  message?: string
+  displayMessage?: string
+  data?: { rows?: CmsPresence[] }
+}
+
+// How often the On/Off badge is re-read while the tab is visible. Presence
+// changes when someone opens or closes the app, so half a minute is current
+// enough without a socket of our own.
+const CMS_PRESENCE_REFRESH_MS = 30_000
 
 type UsageByDateResponse = {
   isSuccess: boolean
@@ -1317,6 +1345,15 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   const [filterSyncedNo, setFilterSyncedNo] = useState(false)
   const [filterUsingMdYes, setFilterUsingMdYes] = useState(false)
   const [filterUsingMdNo, setFilterUsingMdNo] = useState(false)
+  const [filterCmsYes, setFilterCmsYes] = useState(false)
+  const [filterCmsNo, setFilterCmsNo] = useState(false)
+  // Desktop app On/Off — applied in the browser to the rows already loaded,
+  // since presence is a live socket read, not a stored field the BE can match.
+  const [filterConnOn, setFilterConnOn] = useState(false)
+  const [filterConnOff, setFilterConnOff] = useState(false)
+  // Typed value and the debounced one actually sent, same as the search box.
+  const [cmsVersionInput, setCmsVersionInput] = useState('')
+  const [cmsVersion, setCmsVersion] = useState('')
   const [filterAnchor, setFilterAnchor] = useState<null | HTMLElement>(null)
 
   // Account count (credentials configured across the ticked platforms, or all
@@ -1470,6 +1507,10 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   const [usageLoading, setUsageLoading] = useState(false)
   const [usageError, setUsageError] = useState<string | null>(null)
 
+  // companyId → presence. Absent until the first answer, so the badge is not
+  // drawn as "Off" before anything has been asked.
+  const [cmsPresence, setCmsPresence] = useState<Record<string, CmsPresence>>({})
+
   // Ordering by a usage column is done by the DB across every company that
   // survived the filters, not by the table across the ten rows on screen —
   // "who spent the most today" is a question about the estate, and a page-local
@@ -1509,6 +1550,27 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     return filterUsingMdYes ? 'yes' : 'no'
   }, [filterUsingMdYes, filterUsingMdNo])
 
+  const cmsUser = useMemo<'yes' | 'no' | undefined>(() => {
+    if (filterCmsYes === filterCmsNo) return undefined
+
+    return filterCmsYes ? 'yes' : 'no'
+  }, [filterCmsYes, filterCmsNo])
+
+  const cmsConnection = useMemo<'on' | 'off' | undefined>(() => {
+    if (filterConnOn === filterConnOff) return undefined
+
+    return filterConnOn ? 'on' : 'off'
+  }, [filterConnOn, filterConnOff])
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setCmsVersion(cmsVersionInput.trim())
+      setPage(0)
+    }, 400)
+
+    return () => clearTimeout(t)
+  }, [cmsVersionInput])
+
   // True when the table is scoped to a hand-picked set of companies. Tracked
   // apart from activeFilterCount because that number is the Filter popover's
   // badge, and the company filter is not one of its controls.
@@ -1520,6 +1582,9 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     (credentialVerified ? 1 : 0) +
     (masterDataSynced ? 1 : 0) +
     (isUsingMasterData ? 1 : 0) +
+    (cmsUser ? 1 : 0) +
+    (cmsConnection ? 1 : 0) +
+    (cmsVersion ? 1 : 0) +
     (account.payload ? 1 : 0) +
     // The usage day is always set, so it only counts as a filter once it is
     // something other than the default — otherwise the badge would never be 0.
@@ -1534,6 +1599,12 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     setFilterSyncedNo(false)
     setFilterUsingMdYes(false)
     setFilterUsingMdNo(false)
+    setFilterCmsYes(false)
+    setFilterCmsNo(false)
+    setFilterConnOn(false)
+    setFilterConnOff(false)
+    setCmsVersionInput('')
+    setCmsVersion('')
     setUsageDate(new Date())
     account.setFilters(['all'])
     setPage(0)
@@ -1596,6 +1667,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
           ...(credentialVerified ? { credentialVerified } : {}),
           ...(masterDataSynced ? { masterDataSynced } : {}),
           ...(isUsingMasterData ? { isUsingMasterData } : {}),
+          ...(cmsUser ? { cmsUser } : {}),
+          ...(cmsVersion ? { cmsAppVersion: cmsVersion } : {}),
           ...(account.payload ? { accountFilter: account.payload } : {}),
           ...(companyFilter.companyIds.length ? { companyIds: companyFilter.companyIds } : {}),
           // Omitted unless a usage column is actually sorted — it costs the BE
@@ -1640,6 +1713,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     credentialVerified,
     masterDataSynced,
     isUsingMasterData,
+    cmsUser,
+    cmsVersion,
     account.payloadKey,
     companyFilter.companyIdsKey,
     usageSort,
@@ -1707,6 +1782,58 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
 
     run()
   }, [rows, usageDay])
+
+  // ── CMS desktop app On/Off ─────────────────────────────────────────────
+  // Re-read for the page's companies on every page change and every
+  // CMS_PRESENCE_REFRESH_MS while the tab is visible. A failed read keeps the
+  // last answer rather than flipping every badge to Off.
+  const presenceReqRef = useRef(0)
+
+  useEffect(() => {
+    const companyIds = rows.map(r => r.companyId).filter(Boolean)
+
+    setCmsPresence({})
+
+    if (companyIds.length === 0) return
+
+    const load = async () => {
+      const reqId = ++presenceReqRef.current
+
+      try {
+        const res = await fetch('/api/company/cms-presence', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ companyIds })
+        })
+
+        const json = (await res.json().catch(() => null)) as CmsPresenceResponse | null
+
+        if (reqId !== presenceReqRef.current || !res.ok || !json?.isSuccess) return
+
+        setCmsPresence(Object.fromEntries((json.data?.rows ?? []).map(r => [r.companyId, r])))
+      } catch {
+        // Network blip — keep what is shown; the next tick tries again.
+      }
+    }
+
+    load()
+
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') load()
+    }, CMS_PRESENCE_REFRESH_MS)
+
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') load()
+    }
+
+    document.addEventListener('visibilitychange', onVisible)
+
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+      presenceReqRef.current++
+    }
+  }, [rows])
 
   const selectedCompanyIds = useMemo(
     () => Object.entries(selected).filter(([, v]) => v).map(([k]) => k),
@@ -1812,14 +1939,24 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     fetchRows()
   }
 
+  // The On/Off filter narrows the current page only. A company whose presence
+  // has not loaded yet counts as Off.
+  const visibleRows = useMemo(
+    () =>
+      cmsConnection
+        ? rows.filter(r => !!cmsPresence[r.companyId]?.online === (cmsConnection === 'on'))
+        : rows,
+    [rows, cmsPresence, cmsConnection]
+  )
+
   const pageIdsAllSelected = useMemo(
-    () => rows.length > 0 && rows.every(r => selected[r.companyId]),
-    [rows, selected]
+    () => visibleRows.length > 0 && visibleRows.every(r => selected[r.companyId]),
+    [visibleRows, selected]
   )
 
   const pageIdsSomeSelected = useMemo(
-    () => rows.some(r => selected[r.companyId]),
-    [rows, selected]
+    () => visibleRows.some(r => selected[r.companyId]),
+    [visibleRows, selected]
   )
 
   const toggleAllOnPage = () => {
@@ -1827,9 +1964,9 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
       const next = { ...prev }
 
       if (pageIdsAllSelected) {
-        for (const r of rows) delete next[r.companyId]
+        for (const r of visibleRows) delete next[r.companyId]
       } else {
-        for (const r of rows) if (r.companyId) next[r.companyId] = true
+        for (const r of visibleRows) if (r.companyId) next[r.companyId] = true
       }
 
       return next
@@ -2151,6 +2288,53 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
         header: 'Phone',
         cell: ({ row }) => <Typography>{row.original.adminPhone || '—'}</Typography>
       }),
+      columnHelper.accessor('cmsAppVersion', {
+        header: 'CMS App',
+        enableSorting: false,
+        cell: ({ row }) => {
+          const presence = cmsPresence[row.original.companyId]
+
+          // On/Off from the live socket: "On" means a desktop app of this
+          // company is connected to the backend right now.
+          const presenceChip = presence ? (
+            <Tooltip
+              title={
+                presence.online
+                  ? `${presence.clients} app${presence.clients === 1 ? '' : 's'} connected` +
+                    (presence.since ? ` since ${new Date(presence.since).toLocaleString()}` : '') +
+                    (presence.appVersions.length ? ` · v${presence.appVersions.join(', v')}` : '')
+                  : 'No desktop app connected right now'
+              }
+            >
+              <Chip
+                size='small'
+                variant='tonal'
+                color={presence.online ? 'success' : 'secondary'}
+                icon={<i className={presence.online ? 'tabler-plug-connected' : 'tabler-plug-connected-x'} />}
+                label={presence.online ? 'On' : 'Off'}
+              />
+            </Tooltip>
+          ) : null
+
+          return row.original.cmsAppVersion ? (
+            <div className='flex flex-col items-start gap-1'>
+              <Typography className='whitespace-nowrap'>v{row.original.cmsAppVersion}</Typography>
+              <Chip
+                size='small'
+                variant='tonal'
+                color={row.original.cmsTermsAgreed ? 'success' : 'warning'}
+                label={row.original.cmsTermsAgreed ? 'Terms agreed' : 'Terms pending'}
+              />
+              {presenceChip}
+            </div>
+          ) : (
+            <div className='flex flex-col items-start gap-1'>
+              <Typography color='text.disabled'>Not installed</Typography>
+              {presence?.online ? presenceChip : null}
+            </div>
+          )
+        }
+      }),
       {
         id: 'lastSync',
         header: 'Last Sync',
@@ -2318,12 +2502,13 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
       toggleExpanded,
       usage,
       usageSort,
-      cycleUsageSort
+      cycleUsageSort,
+      cmsPresence
     ]
   )
 
   const table = useReactTable({
-    data: rows,
+    data: visibleRows,
     columns,
     // The template augments @tanstack/table-core with a `fuzzy` filter, which
     // makes filterFns required on every table. This one filters server-side,
@@ -2556,6 +2741,67 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
                         setPage(0)
                       }}
                     />
+                  </div>
+                </div>
+              </div>
+
+              <Divider />
+
+              <div className='flex flex-col gap-1'>
+                <Typography variant='overline' color='text.disabled' className='leading-none'>
+                  CMS user
+                </Typography>
+                <Typography variant='caption' color='text.secondary' className='mbe-1'>
+                  settings.cmsAppVersion — the desktop app has reported a version
+                </Typography>
+                <div className='flex gap-2'>
+                  <div className='flex-1'>
+                    <FilterCheck
+                      dense
+                      label='Yes'
+                      checked={filterCmsYes}
+                      onChange={v => {
+                        setFilterCmsYes(v)
+                        setPage(0)
+                      }}
+                    />
+                  </div>
+                  <div className='flex-1'>
+                    <FilterCheck
+                      dense
+                      label='No'
+                      checked={filterCmsNo}
+                      onChange={v => {
+                        setFilterCmsNo(v)
+                        setPage(0)
+                      }}
+                    />
+                  </div>
+                </div>
+                <CustomTextField
+                  size='small'
+                  fullWidth
+                  placeholder='Exact CMS version, e.g. 0.0.8'
+                  value={cmsVersionInput}
+                  onChange={e => setCmsVersionInput(e.target.value)}
+                />
+              </div>
+
+              <Divider />
+
+              <div className='flex flex-col gap-1'>
+                <Typography variant='overline' color='text.disabled' className='leading-none'>
+                  CMS app connection
+                </Typography>
+                <Typography variant='caption' color='text.secondary' className='mbe-1'>
+                  Desktop app connected right now — filters the companies on this page only
+                </Typography>
+                <div className='flex gap-2'>
+                  <div className='flex-1'>
+                    <FilterCheck dense label='On' checked={filterConnOn} onChange={setFilterConnOn} />
+                  </div>
+                  <div className='flex-1'>
+                    <FilterCheck dense label='Off' checked={filterConnOff} onChange={setFilterConnOff} />
                   </div>
                 </div>
               </div>
@@ -2817,6 +3063,44 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
               }}
             />
           )}
+          {cmsUser && (
+            <Chip
+              size='small'
+              variant='tonal'
+              color='primary'
+              label={`CMS user: ${cmsUser === 'yes' ? 'Yes' : 'No'}`}
+              onDelete={() => {
+                setFilterCmsYes(false)
+                setFilterCmsNo(false)
+                setPage(0)
+              }}
+            />
+          )}
+          {cmsConnection && (
+            <Chip
+              size='small'
+              variant='tonal'
+              color='primary'
+              label={`CMS app: ${cmsConnection === 'on' ? 'On' : 'Off'}`}
+              onDelete={() => {
+                setFilterConnOn(false)
+                setFilterConnOff(false)
+              }}
+            />
+          )}
+          {cmsVersion && (
+            <Chip
+              size='small'
+              variant='tonal'
+              color='primary'
+              label={`CMS version: ${cmsVersion}`}
+              onDelete={() => {
+                setCmsVersionInput('')
+                setCmsVersion('')
+                setPage(0)
+              }}
+            />
+          )}
           <Button size='small' color='secondary' onClick={clearFilters}>
             Clear all
           </Button>
@@ -2859,7 +3143,7 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
                 </td>
               </tr>
             </tbody>
-          ) : rows.length === 0 ? (
+          ) : visibleRows.length === 0 ? (
             <tbody>
               <tr>
                 <td colSpan={table.getVisibleFlatColumns().length} className='text-center'>
