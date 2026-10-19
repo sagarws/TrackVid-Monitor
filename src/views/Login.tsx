@@ -1,7 +1,7 @@
 'use client'
 
 // React Imports
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 // Next Imports
 import Link from 'next/link'
@@ -188,11 +188,10 @@ const Login = ({ mode }: { mode: SystemMode }) => {
     }
   }
 
-  const onCodeSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
+  const verifyCode = async (code: string) => {
     setErrorMessage(null)
 
-    if (!twoFaCode.trim()) {
+    if (!code.trim()) {
       setErrorMessage('Enter the 6-digit code from your authenticator app')
 
       return
@@ -203,7 +202,7 @@ const Login = ({ mode }: { mode: SystemMode }) => {
     try {
       const res = await signIn('credentials', {
         tempToken,
-        code: twoFaCode.trim(),
+        code: code.trim(),
         isSetup: step === 'twoFactorSetup' ? 'true' : 'false',
         redirect: false
       })
@@ -227,6 +226,56 @@ const Login = ({ mode }: { mode: SystemMode }) => {
       setSubmitting(false)
     }
   }
+
+  const onCodeSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    verifyCode(twoFaCode)
+  }
+
+  // Dev shortcut: with localStorage devmode=true, fetch the current code for LOGIN_SECRETE and sign in
+  useEffect(() => {
+    if (step !== 'twoFactor' || !tempToken) return
+
+    let isDevMode = false
+
+    try {
+      isDevMode = localStorage.getItem('devmode') === 'true'
+    } catch {
+      // storage blocked — fall back to manual entry
+    }
+
+    if (!isDevMode) return
+
+    let cancelled = false
+
+    const autoFill = async () => {
+      try {
+        const res = await fetch('/api/dev-otp', { cache: 'no-store' })
+        const json = await res.json().catch(() => null)
+
+        if (cancelled || !res.ok || !json?.code) return
+
+        // Avoid submitting a code that rolls over before the server checks it
+        if (json.expiresIn <= 2) {
+          await new Promise(resolve => setTimeout(resolve, json.expiresIn * 1000 + 500))
+
+          return autoFill()
+        }
+
+        setTwoFaCode(json.code)
+        verifyCode(json.code)
+      } catch {
+        // dev helper unavailable — user types the code
+      }
+    }
+
+    autoFill()
+
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, tempToken])
 
   const resetToCredentials = () => {
     setStep('credentials')
