@@ -3,6 +3,7 @@
   "version": "5.0.1",
   "license": "Commercial",
   "private": true,
+  "packageManager": "pnpm@10.18.3",
   "scripts": {
     "dev": "node agent/dev-runner.mjs",
     "build": "next build",

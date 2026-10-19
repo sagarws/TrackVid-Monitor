@@ -437,6 +437,10 @@ const PendingVmsList = () => {
   const table = useReactTable({
     data: rows,
     columns,
+
+    // The template's FilterFns augmentation makes filterFns required on every
+    // table. Rows are filtered server-side, so a pass-through satisfies it.
+    filterFns: { fuzzy: () => true },
     getCoreRowModel: getCoreRowModel()
   })
 
