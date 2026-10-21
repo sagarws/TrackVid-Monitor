@@ -164,3 +164,153 @@ same discipline binds the settings UI:
 A toggle written here changes runtime behaviour in both runners with no code
 change at all, so a platform key you invent that the runners do not know is a
 setting nothing reads. Match `PLATFORM_AUTOMATIONS` exactly, including casing.
+
+<!-- BEGIN trackvid-review-rules v1 — identical in every TrackVid repo under D:\Sagar. Edit all copies together. -->
+## Review rules — applied WHILE developing, not after
+
+These rules bind every change made in this repo, from the first line written.
+The goal is that a finished feature needs no separate review pass.
+
+**While writing code:** apply LAYERS 1–10 below as you go. When a choice would
+violate one (unguarded route, unindexed query, listener without teardown,
+renamed contract field…), make the compliant choice instead and say why in one
+line. Do not leave a known Blocker or High in code you hand back.
+
+**Before saying a feature is done** — every time, without being asked:
+
+1. Diff the whole branch, not just the last edit:
+   `git fetch origin && git diff origin/main...HEAD` plus `git status` for
+   uncommitted work. Commits already on `main` are not part of the review.
+2. Run every LAYER below against that diff. Layers marked (BE) apply to
+   TrackVid-BE; in other repos, apply their intent to whatever plays that role
+   (IPC handlers, local DB, socket handlers) or mark them N/A.
+3. Fix every Blocker and High in place. Leave Medium/nits listed, not fixed,
+   unless trivial.
+4. Run this repo's verify command (build + tests). Report real results.
+5. Check sibling repos for any contract you touched (LAYER 7). They sit next
+   to this one under `D:\Sagar\` — TrackVid-BE, TrackVid-FE, Trackvid-CMS,
+   Trackvid-Monitor, TrackVid-app, Argos-Watch-TrackVid-App,
+   TrackVid-Mobile-app, TrackVid-Print-Agent, Automated-Scripts,
+   TrackVid-Automation-Core. Grep them; don't assume.
+6. Report in the OUTPUT FORMAT below.
+
+For each LAYER, state what you actively verified, what you skipped and why,
+and what you couldn't verify without runtime access.
+
+### OUTPUT FORMAT
+- Verdict: MERGE / MERGE WITH FIXES / DO NOT MERGE
+- Blockers (critical): each with file:line + failure scenario + 1-line fix
+- High: same shape
+- Medium / nits: brief
+- What looks good: table of key design decisions worth preserving
+- Deploy checklist: pre-deploy blockers, post-deploy monitoring, deploy order
+
+### LAYER 1 — CODE QUALITY (FE + BE)
+- Silent breakage: trace every changed function through every caller.
+  No unrelated behavior change without callout.
+- CPU/RAM: no new loops over large arrays in render, no cloning of big
+  objects per keystroke, no unbounded state/collection growth.
+- Memory leaks: every addEventListener, setInterval, setTimeout,
+  URL.createObjectURL, AbortController, subscription has matching teardown.
+- Race conditions: unmount guard, AbortController, seqRef for out-of-order
+  network responses, effect keys for stale closures.
+- Error handling: undefined/null/empty/network-fail/stale-token/perm-denied
+  all have defined behavior. No silent `catch {}` without comment explaining
+  why swallowing is correct.
+- Security: no `dangerouslySetInnerHTML` with untrusted input, no `eval`,
+  no shell string building, no `javascript:` URL reaches `<a href>`/`<img src>`.
+- Duplication: grep for existing helper before adding new one.
+
+### LAYER 2 — AUTH & ROUTES (BE)
+For every new/modified route:
+- Middleware present? Which tier?
+  - `authMiddleware` = any logged-in user (weakest)
+  - `adminAuth(["permission"])` = admin with permission
+  - `systemAdminAuth, adminOnly` = system admin (strongest, use for
+    destructive/cross-company writes)
+- Destructive endpoint (delete, bulk update, cross-company mutate) MUST
+  be sysadmin-gated.
+- Every read/write scoped by `companyId` from `req.user`?
+- Blast radius: single-tenant / multi-tenant / global? Match to auth tier.
+
+### LAYER 3 — DB QUERIES (BE)
+For every new find/findOne/updateMany/aggregate:
+- Which index serves it? Explicit — name the index.
+- `$regex` — indexable only if anchored `^` AND no `i` flag. Otherwise
+  collscan. Case-insensitive → use `collation({strength:2})` + collation
+  index, not regex.
+- `$or` — each branch needs its own compound index.
+- `$expr` with `$toLower`/`$toUpper` → collscan, not sargable.
+- Compound index prefix: equality fields first, then range/sort.
+- `.lean()` on read-only queries.
+- `.select()` on large docs (avoid full-doc reads).
+- `bulkWrite({ordered:false})` — check per-op errors, don't just report
+  queued count as success.
+
+### LAYER 4 — MODELS / MIGRATIONS (BE)
+- New schema field: existing rows still validate? Default value sensible?
+- Enum expansion: grep every `switch` consumer for missing case handling.
+- Field rename: migration script included OR legacy shape preserved via
+  fallback lookup?
+- Snapshot vs live-lookup: if you snapshot at create time, changes to
+  source data after don't propagate. Confirm intent.
+- Legacy row shapes on hydration — reconstruct don't overwrite.
+  Common bug: `typeof x[0] !== 'string'` check on array → treats legacy
+  string[] as unseeded → wipes data on next save.
+
+### LAYER 5 — BULK / BATCH OPS
+- Batch size cap declared as constant.
+- Per-row error accumulation, not silent drop.
+- Atomicity guarantee stated (all-or-nothing, best-effort, transactional).
+- Mock Response objects (if invoking a handler in-process) stub the
+  FULL Response surface, not just status/json — future handler edits
+  reaching for setHeader/write/pipe must not throw TypeError.
+
+### LAYER 6 — BUSINESS INVARIANTS
+- Status transition gates preserved (e.g. don't demote RESOLVED → PENDING).
+- Silent overwrites: does new code stomp operator-set fields
+  (remark, status, notes) that user typed manually?
+- Bulk paths respect the same gates single-row paths enforce.
+
+### LAYER 7 — CROSS-FILE WIRING
+- Hook consumers destructure every prop they need.
+  Regression pattern: hook adds new field, half the callers pick it up.
+- Duplicate lookups: same BE endpoint called from two places for same
+  keystroke? Consolidate.
+- BE contract change: verify App/scripts/other repos still match.
+- Route ordering: `/foo/:id` before `/foo/bulk` catches "bulk" as id.
+- Duplicate route registrations (dead code but confusing).
+
+### LAYER 8 — PR DISCIPLINE
+- Own CLAUDE.md rules — does THIS change violate them? (Common: PR that
+  adds "no regex" rule uses regex 3 places.)
+- Deleted UX affordances (Cancel button, banner, exit path) — was
+  the deletion intentional? Left user stuck?
+- Prior-review findings — did the developer actually fix them or
+  just add optional chaining and call it fixed?
+- Constants / slug tables: dead OR-arms (`x === "a" || x === "a"`),
+  typos (`naykaa` vs `nykaa`), duplicate map entries.
+
+### LAYER 9 — DEPLOY RISK
+- Blast radius per blocker: single user / single company / all companies.
+- Deploy order: BE before FE if contract change; App last (or
+  simultaneously via version-gate) if App relies on new BE fields.
+- What breaks between "merge now" and "fix tomorrow"? If any
+  overnight-damage scenario exists (unauth destructive endpoint,
+  silent data corruption, silent data loss), block the merge.
+- Feature flag / dark launch option for risky features.
+
+### LAYER 10 — REPORTING
+For each blocker: state exact fix, not vague direction.
+Bad: "Add auth to this endpoint."
+Good: "Line 1064: replace `router.post("/sync-spf-tat-to-companies", handler)`
+       with `router.post("/sync-spf-tat-to-companies", systemAdminAuth,
+       adminOnly, handler)`."
+
+For each fix: state 1 concrete failure scenario ("bot scans public URL,
+finds /sync-spf-tat-to-companies, POSTs empty body, TAT wiped on 500
+companies").
+
+Never say "looks good overall" without listing what specifically you
+verified. If you didn't check indexes, say so.
+<!-- END trackvid-review-rules -->

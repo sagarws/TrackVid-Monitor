@@ -15,6 +15,7 @@ import Typography from '@mui/material/Typography'
 import CustomTabList from '@core/components/mui/TabList'
 import AutomationTab from './AutomationTab'
 import DesktopAppTab from './DesktopAppTab'
+import IntegrationsTab from './IntegrationsTab'
 
 // Bulk Management — "apply this setting to a lot of companies at once".
 //
@@ -25,7 +26,8 @@ import DesktopAppTab from './DesktopAppTab'
 
 const TABS = [
   { value: 'automation', label: 'Automation', icon: 'tabler-robot' },
-  { value: 'desktop-app', label: 'Desktop App', icon: 'tabler-device-desktop' }
+  { value: 'desktop-app', label: 'Desktop App', icon: 'tabler-device-desktop' },
+  { value: 'integrations', label: 'Integrations', icon: 'tabler-plug-connected' }
 ] as const
 
 const BulkManagement = () => {
@@ -59,6 +61,9 @@ const BulkManagement = () => {
           </TabPanel>
           <TabPanel value='desktop-app' className='p-0'>
             <DesktopAppTab />
+          </TabPanel>
+          <TabPanel value='integrations' className='p-0'>
+            <IntegrationsTab />
           </TabPanel>
         </Grid>
       </Grid>

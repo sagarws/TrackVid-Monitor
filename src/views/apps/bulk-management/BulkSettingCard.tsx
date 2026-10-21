@@ -66,6 +66,10 @@ type Props = {
   enabledCount?: (platform: string, column: string) => number | null
   totalCompanies: number
   roster: CompanyRoster
+  /** Proxy route this card writes through. */
+  endpoint: string
+  /** Heading of the row column — "Platform" unless the rows are something else. */
+  rowLabel?: string
   /** The setting half of the request body, built from the moved cells. */
   buildPayload: (intents: Intents) => Record<string, unknown>
   /** Fired after a successful write so the caller can refresh the counts. */
@@ -141,6 +145,8 @@ const BulkSettingCard = ({
   enabledCount,
   totalCompanies,
   roster,
+  endpoint,
+  rowLabel = 'Platform',
   buildPayload,
   onApplied,
   warning
@@ -241,7 +247,7 @@ const BulkSettingCard = ({
     setResult(null)
 
     try {
-      const res = await fetch('/api/company/automation-routing', {
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
         body: JSON.stringify({
@@ -279,7 +285,7 @@ const BulkSettingCard = ({
       setSubmitting(false)
       setConfirmOpen(false)
     }
-  }, [buildPayload, changes.length, currentScope, intents, onApplied])
+  }, [buildPayload, changes.length, currentScope, endpoint, intents, onApplied])
 
   return (
     <Card>
@@ -308,7 +314,7 @@ const BulkSettingCard = ({
           <Table size='small'>
             <TableHead>
               <TableRow>
-                <TableCell>Platform</TableCell>
+                <TableCell>{rowLabel}</TableCell>
                 {columns.map(column => (
                   <TableCell key={column.key} align='center'>
                     {column.label}
@@ -323,7 +329,7 @@ const BulkSettingCard = ({
               <TableRow className='bg-actionHover'>
                 <TableCell>
                   <Typography variant='body2' color='text.secondary'>
-                    All platforms
+                    All {rowLabel.toLowerCase()}s
                   </Typography>
                 </TableCell>
                 {columns.map(column => (
@@ -421,7 +427,7 @@ const BulkSettingCard = ({
           <Table size='small'>
             <TableHead>
               <TableRow>
-                <TableCell>Platform</TableCell>
+                <TableCell>{rowLabel}</TableCell>
                 <TableCell>Setting</TableCell>
                 <TableCell align='right'>New value</TableCell>
               </TableRow>

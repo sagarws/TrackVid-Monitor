@@ -218,6 +218,7 @@ const AutomationTab = () => {
           enabledCount={pairCount('desktopExecution')}
           totalCompanies={summary.totalCompanies}
           roster={roster}
+          endpoint='/api/company/automation-routing'
           buildPayload={buildPairPayload('desktopExecution')}
           onApplied={load}
           warning='Turning this on for a company with no desktop client connected leaves its claims queued and unworked — and a queued claim looks exactly like one that has not run yet.'
@@ -235,6 +236,7 @@ const AutomationTab = () => {
           enabledCount={pairCount('apiBasedAutomation')}
           totalCompanies={summary.totalCompanies}
           roster={roster}
+          endpoint='/api/company/automation-routing'
           buildPayload={buildPairPayload('apiBasedAutomation')}
           onApplied={load}
         />
@@ -257,6 +259,7 @@ const AutomationTab = () => {
           }}
           totalCompanies={summary.totalCompanies}
           roster={roster}
+          endpoint='/api/company/automation-routing'
           buildPayload={buildFlagPayload}
           onApplied={load}
           warning='This is a security control, not a preference: the backend gates the only endpoint that emits a stored marketplace password on the same flag. Turning it on makes those passwords reachable by the desktop app.'
