@@ -3404,7 +3404,11 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
                               No mailboxes connected for this company.
                             </Typography>
                           ) : (
-                            <MailboxList mailboxes={mailboxes[row.original.companyId]} />
+                            <MailboxList
+                              mailboxes={mailboxes[row.original.companyId]}
+                              companyId={row.original.companyId}
+                              onToast={setToast}
+                            />
                           )}
                         </div>
                       </td>

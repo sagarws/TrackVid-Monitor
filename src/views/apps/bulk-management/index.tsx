@@ -16,6 +16,7 @@ import CustomTabList from '@core/components/mui/TabList'
 import AutomationTab from './AutomationTab'
 import DesktopAppTab from './DesktopAppTab'
 import IntegrationsTab from './IntegrationsTab'
+import EmailAutomationTab from './EmailAutomationTab'
 
 // Bulk Management — "apply this setting to a lot of companies at once".
 //
@@ -27,7 +28,8 @@ import IntegrationsTab from './IntegrationsTab'
 const TABS = [
   { value: 'automation', label: 'Automation', icon: 'tabler-robot' },
   { value: 'desktop-app', label: 'Desktop App', icon: 'tabler-device-desktop' },
-  { value: 'integrations', label: 'Integrations', icon: 'tabler-plug-connected' }
+  { value: 'integrations', label: 'Integrations', icon: 'tabler-plug-connected' },
+  { value: 'email-automation', label: 'Email Automation', icon: 'tabler-mail' }
 ] as const
 
 const BulkManagement = () => {
@@ -64,6 +66,9 @@ const BulkManagement = () => {
           </TabPanel>
           <TabPanel value='integrations' className='p-0'>
             <IntegrationsTab />
+          </TabPanel>
+          <TabPanel value='email-automation' className='p-0'>
+            <EmailAutomationTab />
           </TabPanel>
         </Grid>
       </Grid>

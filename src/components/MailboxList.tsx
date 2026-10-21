@@ -7,6 +7,8 @@ import Typography from '@mui/material/Typography'
 
 // Component Imports
 import CopyButton from '@/components/CopyButton'
+import MailFetchFolderSelect, { useMailFetchFolder } from '@/components/MailFetchFolderSelect'
+import RunMailFetchButton, { useRunMailFetch } from '@/components/RunMailFetchButton'
 
 // One mailbox as /system-admin/company/mailboxes-summary reports it — the
 // subset of the detail page's Mailbox a list row needs.
@@ -68,22 +70,46 @@ export const relativeTime = (iso: string | null) => {
   return `${Math.floor(mins / 1440)}d ago`
 }
 
-// Read-only list of a company's mailboxes: name, status, auth type, then
+type MailboxListProps = {
+  mailboxes: MailboxSummary[]
+  /** When given, each row also carries the company's "Fetch from" picker and "Run fetch". */
+  companyId?: string
+  onToast?: (toast: { severity: 'success' | 'error' | 'warning'; message: string }) => void
+}
+
+// A company's mailboxes: name, status, auth type, then
 // "address · provider · synced X ago". Used by the company list's expanded row;
 // the detail page renders the same header line with its own action buttons.
-const MailboxList = ({ mailboxes }: { mailboxes: MailboxSummary[] }) => (
-  <div className='flex flex-col gap-2'>
-    {mailboxes.map(mailbox => (
-      <div key={mailbox.id} className='flex items-start gap-3 rounded border plb-2 pli-3 bg-backgroundPaper'>
-        <i className='tabler-mail text-xl text-primary mbs-1' />
-        <div className='flex flex-col gap-0.5 min-is-0'>
-          <MailboxHeadline mailbox={mailbox} />
-          <MailboxMeta mailbox={mailbox} />
+const MailboxList = ({ mailboxes, companyId, onToast }: MailboxListProps) => {
+  // One read per company, shared by every row's picker. No companyId → no fetch.
+  const fetchFolder = useMailFetchFolder(companyId ?? '', onToast)
+  const runFetch = useRunMailFetch(companyId ?? '', onToast)
+
+  return (
+    <div className='flex flex-col gap-2'>
+      {mailboxes.map(mailbox => (
+        <div
+          key={mailbox.id}
+          className='flex items-center justify-between gap-4 flex-wrap rounded border plb-2 pli-3 bg-backgroundPaper'
+        >
+          <div className='flex items-start gap-3 min-is-0'>
+            <i className='tabler-mail text-xl text-primary mbs-1' />
+            <div className='flex flex-col gap-0.5 min-is-0'>
+              <MailboxHeadline mailbox={mailbox} />
+              <MailboxMeta mailbox={mailbox} />
+            </div>
+          </div>
+          {companyId && (
+            <div className='flex items-center gap-2'>
+              <MailFetchFolderSelect state={fetchFolder} />
+              <RunMailFetchButton state={runFetch} />
+            </div>
+          )}
         </div>
-      </div>
-    ))}
-  </div>
-)
+      ))}
+    </div>
+  )
+}
 
 export const MailboxHeadline = ({ mailbox }: { mailbox: MailboxSummary }) => (
   <div className='flex items-center gap-2 flex-wrap'>

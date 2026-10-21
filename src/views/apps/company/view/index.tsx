@@ -33,6 +33,8 @@ import MultiStepRecordingCard from './MultiStepRecordingCard'
 import UsageCard from './UsageCard'
 import CopyButton from '@/components/CopyButton'
 import { mailboxProviderLabel, mailboxStatusColor, mailboxStatusLabel, relativeTime } from '@/components/MailboxList'
+import MailFetchFolderSelect, { useMailFetchFolder } from '@/components/MailFetchFolderSelect'
+import RunMailFetchButton, { useRunMailFetch } from '@/components/RunMailFetchButton'
 import CopyableId from '@/components/CopyableId'
 import CustomTextField from '@core/components/mui/TextField'
 
@@ -105,6 +107,10 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [toast, setToast] = useState<Toast | null>(null)
+
+  // Company-wide, so one read shared by every mailbox row's picker.
+  const fetchFolder = useMailFetchFolder(companyId, setToast)
+  const runFetch = useRunMailFetch(companyId, setToast)
 
   const [inFlight, setInFlight] = useState<Set<string>>(new Set())
   const [agentReady, setAgentReady] = useState<boolean | null>(null)
@@ -584,16 +590,19 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
               title='Connected Mailboxes'
               subheader='Inboxes this company&apos;s email automation reads from'
               action={
-                <Button
-                  size='small'
-                  variant='outlined'
-                  color='secondary'
-                  startIcon={<i className='tabler-refresh' />}
-                  disabled={mailboxesLoading}
-                  onClick={fetchMailboxes}
-                >
-                  Refresh
-                </Button>
+                <div className='flex items-center gap-2'>
+                  <RunMailFetchButton state={runFetch} />
+                  <Button
+                    size='small'
+                    variant='outlined'
+                    color='secondary'
+                    startIcon={<i className='tabler-refresh' />}
+                    disabled={mailboxesLoading}
+                    onClick={fetchMailboxes}
+                  >
+                    Refresh
+                  </Button>
+                </div>
               }
             />
             <Divider />
@@ -678,6 +687,7 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
                           </div>
                         </div>
                         <div className='flex items-center gap-2'>
+                          <MailFetchFolderSelect state={fetchFolder} />
                           <Tooltip title='Pick the point the poller should read mail forward from'>
                             <span>
                               <Button
