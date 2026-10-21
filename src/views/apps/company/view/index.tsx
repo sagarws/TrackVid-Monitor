@@ -32,6 +32,7 @@ import DesktopAppResolutionCard from './DesktopAppResolutionCard'
 import MultiStepRecordingCard from './MultiStepRecordingCard'
 import UsageCard from './UsageCard'
 import CopyButton from '@/components/CopyButton'
+import { mailboxProviderLabel, mailboxStatusColor, mailboxStatusLabel, relativeTime } from '@/components/MailboxList'
 import CopyableId from '@/components/CopyableId'
 import CustomTextField from '@core/components/mui/TextField'
 
@@ -67,6 +68,7 @@ type Mailbox = {
   displayName: string
   provider: string
   type?: string
+  authType?: string
   status: string
   statusChangedBy: string | null
   ownerEmail: string | null
@@ -78,32 +80,6 @@ type Mailbox = {
   occupiedAt: string | null
   occupiedBy: string | null
   watchError: Record<string, unknown> | null
-}
-
-const mailboxStatusColor = (status: string): 'success' | 'error' | 'warning' | 'default' => {
-  const s = (status || '').toLowerCase()
-
-  if (s === 'connected') return 'success'
-  if (s === 'token_expired') return 'warning'
-  if (s === 'error') return 'error'
-
-  return 'default'
-}
-
-// "40 minutes ago" — the only form of a sync time anyone reads at a glance.
-const relativeTime = (iso: string | null) => {
-  if (!iso) return 'never'
-  const ms = new Date(iso).getTime()
-
-  if (Number.isNaN(ms)) return 'unknown'
-
-  const mins = Math.round((Date.now() - ms) / 60000)
-
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins}m ago`
-  if (mins < 1440) return `${Math.floor(mins / 60)}h ${mins % 60}m ago`
-
-  return `${Math.floor(mins / 1440)}d ago`
 }
 
 // A labelled value with an optional copy button. The detail page is mostly
@@ -655,9 +631,16 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
                                 size='small'
                                 variant='tonal'
                                 color={mailboxStatusColor(mailbox.status)}
-                                label={mailbox.status}
+                                label={mailboxStatusLabel(mailbox.status)}
                               />
-                              <Chip size='small' variant='tonal' label={mailbox.provider} />
+                              {mailbox.authType && (
+                                <Chip
+                                  size='small'
+                                  variant='outlined'
+                                  color='info'
+                                  label={mailbox.authType.toUpperCase()}
+                                />
+                              )}
                               {/* A held lease is why a "connected" mailbox can
                                   still be silently stuck — surfaced, because it
                                   is the thing Restart fixes. */}
@@ -677,6 +660,9 @@ const CompanyView = ({ companyId, impersonateBaseUrl }: Props) => {
                                 {mailbox.email}
                               </Typography>
                               <CopyButton value={mailbox.email} label='mailbox address' />
+                              <Typography variant='caption' color='text.secondary'>
+                                · {mailboxProviderLabel(mailbox.provider)}
+                              </Typography>
                               <Tooltip
                                 title={
                                   mailbox.lastSyncedAt

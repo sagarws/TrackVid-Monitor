@@ -72,6 +72,8 @@ import CopyableId from '@/components/CopyableId'
 import CopyButton from '@/components/CopyButton'
 import SessionJsonDialog from '@/components/SessionJsonDialog'
 import FilterCheck from '@/components/FilterCheck'
+import MailboxList, { MAILBOX_PROVIDERS } from '@/components/MailboxList'
+import type { MailboxSummary } from '@/components/MailboxList'
 import CustomTextField from '@core/components/mui/TextField'
 
 // Style Imports
@@ -537,6 +539,18 @@ type CmsPresenceResponse = {
   displayMessage?: string
   data?: { rows?: CmsPresence[] }
 }
+
+// A page of companies' mailboxes — POST /system-admin/company/mailboxes-summary.
+type MailboxSummaryResponse = {
+  isSuccess?: boolean
+  message?: string
+  displayMessage?: string
+  data?: { rows?: { companyId: string; mailboxes: MailboxSummary[] }[] }
+}
+
+const NO_MAILBOX_PROVIDER_FILTERS: Record<string, boolean> = Object.fromEntries(
+  MAILBOX_PROVIDERS.map(p => [p.key, false])
+)
 
 // How often the On/Off badge is re-read while the tab is visible. Presence
 // changes when someone opens or closes the app, so half a minute is current
@@ -1351,6 +1365,12 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
   // since presence is a live socket read, not a stored field the BE can match.
   const [filterConnOn, setFilterConnOn] = useState(false)
   const [filterConnOff, setFilterConnOff] = useState(false)
+
+  // Mailbox filters — server-side, resolved by the BE to a companyId set.
+  const [filterMailboxYes, setFilterMailboxYes] = useState(false)
+  const [filterMailboxNo, setFilterMailboxNo] = useState(false)
+  const [filterMailboxProviders, setFilterMailboxProviders] =
+    useState<Record<string, boolean>>(NO_MAILBOX_PROVIDER_FILTERS)
   // Typed value and the debounced one actually sent, same as the search box.
   const [cmsVersionInput, setCmsVersionInput] = useState('')
   const [cmsVersion, setCmsVersion] = useState('')
@@ -1562,6 +1582,17 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     return filterConnOn ? 'on' : 'off'
   }, [filterConnOn, filterConnOff])
 
+  const hasMailbox = useMemo<'yes' | 'no' | undefined>(() => {
+    if (filterMailboxYes === filterMailboxNo) return undefined
+
+    return filterMailboxYes ? 'yes' : 'no'
+  }, [filterMailboxYes, filterMailboxNo])
+
+  const selectedMailboxProviders = useMemo(
+    () => MAILBOX_PROVIDERS.map(p => p.key).filter(k => filterMailboxProviders[k]),
+    [filterMailboxProviders]
+  )
+
   useEffect(() => {
     const t = setTimeout(() => {
       setCmsVersion(cmsVersionInput.trim())
@@ -1584,6 +1615,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     (isUsingMasterData ? 1 : 0) +
     (cmsUser ? 1 : 0) +
     (cmsConnection ? 1 : 0) +
+    (hasMailbox ? 1 : 0) +
+    selectedMailboxProviders.length +
     (cmsVersion ? 1 : 0) +
     (account.payload ? 1 : 0) +
     // The usage day is always set, so it only counts as a filter once it is
@@ -1603,6 +1636,9 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     setFilterCmsNo(false)
     setFilterConnOn(false)
     setFilterConnOff(false)
+    setFilterMailboxYes(false)
+    setFilterMailboxNo(false)
+    setFilterMailboxProviders(NO_MAILBOX_PROVIDER_FILTERS)
     setCmsVersionInput('')
     setCmsVersion('')
     setUsageDate(new Date())
@@ -1669,6 +1705,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
           ...(isUsingMasterData ? { isUsingMasterData } : {}),
           ...(cmsUser ? { cmsUser } : {}),
           ...(cmsVersion ? { cmsAppVersion: cmsVersion } : {}),
+          ...(hasMailbox ? { hasMailbox } : {}),
+          ...(selectedMailboxProviders.length ? { mailboxProviders: selectedMailboxProviders } : {}),
           ...(account.payload ? { accountFilter: account.payload } : {}),
           ...(companyFilter.companyIds.length ? { companyIds: companyFilter.companyIds } : {}),
           // Omitted unless a usage column is actually sorted — it costs the BE
@@ -1715,6 +1753,8 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
     isUsingMasterData,
     cmsUser,
     cmsVersion,
+    hasMailbox,
+    selectedMailboxProviders,
     account.payloadKey,
     companyFilter.companyIdsKey,
     usageSort,
@@ -1782,6 +1822,53 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
 
     run()
   }, [rows, usageDay])
+
+  // ── Mailboxes ───────────────────────────────────────────────────────────
+  // Read for the companies on this page only, like usage and CMS presence. A
+  // company missing from the map has not answered yet (cell shows a spinner);
+  // an empty array means it genuinely has no mailbox.
+  const [mailboxes, setMailboxes] = useState<Record<string, MailboxSummary[]>>({})
+  const [mailboxesError, setMailboxesError] = useState<string | null>(null)
+  const mailboxReqRef = useRef(0)
+
+  useEffect(() => {
+    const companyIds = rows.map(r => r.companyId).filter(Boolean)
+
+    setMailboxes({})
+    setMailboxesError(null)
+
+    if (companyIds.length === 0) return
+
+    const reqId = ++mailboxReqRef.current
+
+    const run = async () => {
+      try {
+        const res = await fetch('/api/company/mailboxes-summary', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ companyIds })
+        })
+
+        const json = (await res.json().catch(() => null)) as MailboxSummaryResponse | null
+
+        // A newer page is already in flight — drop this answer.
+        if (reqId !== mailboxReqRef.current) return
+
+        if (!res.ok || !json?.isSuccess) {
+          setMailboxesError(json?.displayMessage || json?.message || `Mailbox request failed (${res.status})`)
+
+          return
+        }
+
+        setMailboxes(Object.fromEntries((json.data?.rows ?? []).map(r => [r.companyId, r.mailboxes ?? []])))
+      } catch (err: any) {
+        if (reqId !== mailboxReqRef.current) return
+        setMailboxesError(err?.message || 'Failed to load mailboxes')
+      }
+    }
+
+    run()
+  }, [rows])
 
   // ── CMS desktop app On/Off ─────────────────────────────────────────────
   // Re-read for the page's companies on every page change and every
@@ -2240,10 +2327,19 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
         enableSorting: false,
         cell: ({ row }) => {
           const isOpen = Boolean(expanded[row.original.companyId])
-          const count = row.original.credentials.reduce((n, p) => n + p.accounts.length, 0)
+          const accountCount = row.original.credentials.reduce((n, p) => n + p.accounts.length, 0)
+          const count = accountCount + (mailboxes[row.original.companyId]?.length ?? 0)
 
           return (
-            <Tooltip title={count ? (isOpen ? 'Hide accounts' : `Show ${count} account${count > 1 ? 's' : ''}`) : 'No accounts'}>
+            <Tooltip
+              title={
+                count
+                  ? isOpen
+                    ? 'Hide accounts'
+                    : `Show ${accountCount} account${accountCount === 1 ? '' : 's'} and mailboxes`
+                  : 'No accounts or mailboxes'
+              }
+            >
               <span>
                 <IconButton
                   size='small'
@@ -2335,6 +2431,44 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
           )
         }
       }),
+      {
+        id: 'mailboxes',
+        header: 'Mailboxes',
+        enableSorting: false,
+        cell: ({ row }) => {
+          const list = mailboxes[row.original.companyId]
+
+          // A failed read is shown as unknown, never as "None" — that would
+          // claim the company has no mailbox.
+          if (!list && mailboxesError)
+            return (
+              <Tooltip title={mailboxesError}>
+                <Typography color='text.disabled'>—</Typography>
+              </Tooltip>
+            )
+          if (!list) return <CircularProgress size={16} />
+          if (list.length === 0) return <Typography color='text.disabled'>None</Typography>
+
+          const connected = list.filter(m => (m.status || '').toLowerCase() === 'connected').length
+          const isOpen = Boolean(expanded[row.original.companyId])
+
+          return (
+            <Tooltip title={isOpen ? 'Hide mailboxes' : list.map(m => m.email).join(', ')}>
+              <Chip
+                size='small'
+                variant='tonal'
+                clickable
+                // Green only when every mailbox is connected — one broken inbox
+                // is the thing worth seeing from the list.
+                color={connected === list.length ? 'success' : 'warning'}
+                icon={<i className='tabler-mail' />}
+                label={connected === list.length ? `${list.length} connected` : `${connected} of ${list.length} connected`}
+                onClick={() => toggleExpanded(row.original.companyId)}
+              />
+            </Tooltip>
+          )
+        }
+      },
       {
         id: 'lastSync',
         header: 'Last Sync',
@@ -2503,7 +2637,9 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
       usage,
       usageSort,
       cycleUsageSort,
-      cmsPresence
+      cmsPresence,
+      mailboxes,
+      mailboxesError
     ]
   )
 
@@ -2810,6 +2946,55 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
 
               <div className='flex flex-col gap-1'>
                 <Typography variant='overline' color='text.disabled' className='leading-none'>
+                  Mailbox
+                </Typography>
+                <Typography variant='caption' color='text.secondary' className='mbe-1'>
+                  Companies using the email service — any ticked provider matches
+                </Typography>
+                <div className='flex gap-2'>
+                  <div className='flex-1'>
+                    <FilterCheck
+                      dense
+                      label='Has mailbox'
+                      checked={filterMailboxYes}
+                      onChange={v => {
+                        setFilterMailboxYes(v)
+                        setPage(0)
+                      }}
+                    />
+                  </div>
+                  <div className='flex-1'>
+                    <FilterCheck
+                      dense
+                      label='No mailbox'
+                      checked={filterMailboxNo}
+                      onChange={v => {
+                        setFilterMailboxNo(v)
+                        setPage(0)
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className='grid grid-cols-2 gap-x-2'>
+                  {MAILBOX_PROVIDERS.map(({ key, label }) => (
+                    <FilterCheck
+                      key={key}
+                      dense
+                      label={label}
+                      checked={filterMailboxProviders[key]}
+                      onChange={v => {
+                        setFilterMailboxProviders(prev => ({ ...prev, [key]: v }))
+                        setPage(0)
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+
+              <Divider />
+
+              <div className='flex flex-col gap-1'>
+                <Typography variant='overline' color='text.disabled' className='leading-none'>
                   Platform
                 </Typography>
                 <Typography variant='caption' color='text.secondary' className='mbe-1'>
@@ -3088,6 +3273,32 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
               }}
             />
           )}
+          {hasMailbox && (
+            <Chip
+              size='small'
+              variant='tonal'
+              color='primary'
+              label={hasMailbox === 'yes' ? 'Has mailbox' : 'No mailbox'}
+              onDelete={() => {
+                setFilterMailboxYes(false)
+                setFilterMailboxNo(false)
+                setPage(0)
+              }}
+            />
+          )}
+          {MAILBOX_PROVIDERS.filter(p => filterMailboxProviders[p.key]).map(p => (
+            <Chip
+              key={`mailbox-${p.key}`}
+              size='small'
+              variant='tonal'
+              color='primary'
+              label={`Mailbox: ${p.label}`}
+              onDelete={() => {
+                setFilterMailboxProviders(prev => ({ ...prev, [p.key]: false }))
+                setPage(0)
+              }}
+            />
+          ))}
           {cmsVersion && (
             <Chip
               size='small'
@@ -3176,6 +3387,26 @@ const CompanyList = ({ impersonateBaseUrl }: Props) => {
                           onToast={setToast}
                           onRenewed={fetchRows}
                         />
+                        <div className='bg-actionHover pbe-4 pli-6'>
+                          <Typography variant='overline' color='text.secondary' className='block mbe-2'>
+                            Connected mailboxes ({mailboxes[row.original.companyId]?.length ?? 0})
+                          </Typography>
+                          {!mailboxes[row.original.companyId] ? (
+                            mailboxesError ? (
+                              <Typography variant='body2' color='error.main'>
+                                {mailboxesError}
+                              </Typography>
+                            ) : (
+                              <CircularProgress size={18} />
+                            )
+                          ) : mailboxes[row.original.companyId].length === 0 ? (
+                            <Typography variant='body2' color='text.disabled'>
+                              No mailboxes connected for this company.
+                            </Typography>
+                          ) : (
+                            <MailboxList mailboxes={mailboxes[row.original.companyId]} />
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ) : null
